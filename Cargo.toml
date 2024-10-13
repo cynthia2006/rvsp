@@ -1,17 +1,16 @@
 [package]
 name = "rvsp"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-description = "Rust (audio) Visualizing Spectrometer"
-authors = ["xsbee <xyesbee@protonmail.com>"]
-homepage = "https://github.com/xsbee/rvsp"
+description = "Audio spectrum visualizer in Rust"
+authors = ["xsbee <xyesbee@protonmail.com>", "Cynthia <cynthia2048@proton.me>"]
 license = "GPL-3.0"
 keywords = ["audio", "fft", "sdl2", "visualizer"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-realfft = "3.1.0"
-sdl2 = "0.35.2"
-const_format = "0.2.30"
-clap = { version = "4.0.27", features = ["derive"] }
+realfft = "3.4.0"
+sdl2 = "0.37.0"
+const_format = "0.2.33"
+clap = { version = "4.5.20", features = ["derive"] }
