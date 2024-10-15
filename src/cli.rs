@@ -27,14 +27,6 @@ pub(crate) struct Args {
     #[arg(long, default_value="10000")]
     pub(crate) max_frequency: f32,
 
-    /// Clamping minimum (in decibels, -∞..0)
-    #[arg(long, default_value = "-80")]
-    pub(crate) db_min: f32,
-
-    /// Clamping maxmimum (in decibels, -∞..0)
-    #[arg(long, default_value = "-20")]
-    pub(crate) db_max: f32,
-
     /// Foreground color (in #AARRGGBB format)
     #[arg(long, default_value = "ffffffff", value_parser = utils::str_to_color)]
     pub(crate) fg: Color,

@@ -2,7 +2,7 @@ use clap::Parser;
 
 use gl::types::GLint;
 use sdl2::audio::AudioSpecDesired;
-use sdl2::event::Event;
+use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
 
 use realfft::RealFftPlanner;
@@ -10,7 +10,7 @@ use realfft::RealFftPlanner;
 use const_format::formatcp;
 use skia_safe::gpu::gl::FramebufferInfo;
 use skia_safe::gpu::{self, backend_render_targets, SurfaceOrigin};
-use skia_safe::ColorType;
+use skia_safe::{ColorType, Surface};
 
 mod callback;
 mod cli;
@@ -65,7 +65,7 @@ fn main() {
     let window = sdl_video
         .window(WINDOW_TITLE, args.width, args.height)
         .position_centered()
-        // .resizable()
+        .resizable()
         .build()
         .unwrap();
 
@@ -96,50 +96,59 @@ fn main() {
             ..Default::default()
         }
     };
-    let backend_render_target = backend_render_targets::make_gl(
-        (args.width as i32, args.height as i32),
-        None,
-        {
-            let mut stencil_size: GLint = 0;
 
-            unsafe {
-                gl::GetFramebufferAttachmentParameteriv(
-                    gl::DRAW_FRAMEBUFFER,
-                    gl::STENCIL,
-                    gl::FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE,
-                    &mut stencil_size,
-                )
-            };
+    let mut stencil_size: GLint = 0;
 
-            stencil_size as usize
-        },
+    unsafe {
+        gl::GetFramebufferAttachmentParameteriv(
+            gl::DRAW_FRAMEBUFFER,
+            gl::STENCIL,
+            gl::FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE,
+            &mut stencil_size,
+        )
+    };
+
+    fn create_surface(
+        width: i32,
+        height: i32,
+        fb_info: FramebufferInfo,
+        gr_context: &mut skia_safe::gpu::DirectContext,
+        stencil_size: i32
+    ) -> Option<Surface> {
+        let backend_render_target = backend_render_targets::make_gl(
+            (width, height),
+            None,
+            stencil_size as usize,
+            fb_info,
+        );
+    
+        gpu::surfaces::wrap_backend_render_target(
+            gr_context,
+            &backend_render_target,
+            SurfaceOrigin::BottomLeft,
+            ColorType::N32,
+            None,
+            None,
+        )
+    }
+
+    let skia_surface = create_surface(
+        args.width as i32,
+        args.height as i32,
         fb_info,
-    );
-
-    let skia_surface = gpu::surfaces::wrap_backend_render_target(
         &mut gr_context,
-        &backend_render_target,
-        SurfaceOrigin::BottomLeft,
-        ColorType::N32,
-        None,
-        None,
-    )
-    .unwrap();
+        stencil_size
+    ).unwrap();
 
     device.resume();
 
     let mut renderer = render::Renderer::new(
         skia_surface,
-        defs::FFT_SIZE,
         args.tau,
         args.min_frequency,
         args.max_frequency,
-        args.db_min,
-        args.db_max,
         args.fg,
-        args.bg,
-        args.width as f32,
-        args.height as f32,
+        args.bg
     );
 
     'running: loop {
@@ -150,13 +159,19 @@ fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                // Event::Window { win_event, .. } => match win_event {
-                //     WindowEvent::Resized(w, h) => {
-                //         renderer.set_width(w as f32);
-                //         renderer.set_height(h as f32);
-                //     },
-                //     _ => {}
-                // },
+                Event::Window { win_event, .. } => match win_event {
+                    WindowEvent::Resized(w, h) => {
+                        let new_surface = create_surface(
+                            w as i32, h as i32,
+                            fb_info,
+                            &mut gr_context,
+                            stencil_size
+                        ).unwrap();
+
+                        renderer.set_surface(new_surface);
+                    },
+                    _ => {}
+                },
                 _ => {}
             }
         }
