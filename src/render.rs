@@ -42,7 +42,7 @@ impl Renderer {
         min_frequency: f32,
         max_frequency: f32,
         foreground: Color,
-        background: Color
+        background: Color,
     ) -> Self {
         let bin_width = defs::FFT_SIZE as f32 / defs::SAMPLERATE as f32;
         let lowest_bin = (bin_width * min_frequency) as usize;

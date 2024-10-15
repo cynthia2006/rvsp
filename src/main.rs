@@ -113,15 +113,11 @@ fn main() {
         height: i32,
         fb_info: FramebufferInfo,
         gr_context: &mut skia_safe::gpu::DirectContext,
-        stencil_size: i32
+        stencil_size: i32,
     ) -> Option<Surface> {
-        let backend_render_target = backend_render_targets::make_gl(
-            (width, height),
-            None,
-            stencil_size as usize,
-            fb_info,
-        );
-    
+        let backend_render_target =
+            backend_render_targets::make_gl((width, height), None, stencil_size as usize, fb_info);
+
         gpu::surfaces::wrap_backend_render_target(
             gr_context,
             &backend_render_target,
@@ -137,8 +133,9 @@ fn main() {
         args.height as i32,
         fb_info,
         &mut gr_context,
-        stencil_size
-    ).unwrap();
+        stencil_size,
+    )
+    .unwrap();
 
     device.resume();
 
@@ -148,7 +145,7 @@ fn main() {
         args.min_frequency,
         args.max_frequency,
         args.fg,
-        args.bg
+        args.bg,
     );
 
     'running: loop {
@@ -162,14 +159,16 @@ fn main() {
                 Event::Window { win_event, .. } => match win_event {
                     WindowEvent::Resized(w, h) => {
                         let new_surface = create_surface(
-                            w as i32, h as i32,
+                            w as i32,
+                            h as i32,
                             fb_info,
                             &mut gr_context,
-                            stencil_size
-                        ).unwrap();
+                            stencil_size,
+                        )
+                        .unwrap();
 
                         renderer.set_surface(new_surface);
-                    },
+                    }
                     _ => {}
                 },
                 _ => {}

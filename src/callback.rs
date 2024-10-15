@@ -11,7 +11,8 @@ impl AudioCallback for Callback {
     fn callback(&mut self, samples: &mut [Self::Channel]) {
         if samples.len() > self.buffer.len() {
             self.buffer.clear();
-            self.buffer.extend(samples.iter().nth(samples.len() - self.buffer.len()));
+            self.buffer
+                .extend(samples.iter().nth(samples.len() - self.buffer.len()));
         } else {
             self.buffer.drain(0..samples.len());
             self.buffer.extend(samples.iter());
