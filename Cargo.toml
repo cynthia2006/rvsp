@@ -14,3 +14,7 @@ realfft = "3.4.0"
 sdl2 = "0.37.0"
 const_format = "0.2.33"
 clap = { version = "4.5.20", features = ["derive"] }
+skia-safe = { version = "0.78.2", features = ["wayland", "gpu"] }
+
+[dependencies.gl]
+git = "https://github.com/bjz/gl-rs"

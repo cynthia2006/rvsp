@@ -1,17 +1,12 @@
 use std::num::ParseIntError;
 use std::f32::consts::PI;
 
-use sdl2::{sys::SDL_FRect, pixels::Color};
+use skia_safe::Color;
 
 pub(crate) fn str_to_color(s: &str) -> Result<Color, ParseIntError> {
     let c = u32::from_str_radix(s, 16)?;
 
-    Ok(Color {
-        a: (c >> 24) as u8,
-        r: (c >> 16 & 0xFF) as u8,
-        g: (c >> 8 & 0xFF) as u8,
-        b: (c & 0xFF) as u8, 
-    })
+    Ok(c.into())
 }
 
 /// Generates a Blackman window of a certain length.
@@ -27,8 +22,4 @@ pub(crate) fn blackman_window(n: usize) -> impl Iterator<Item = f32> {
 
         A0 - A1 * phi.cos() + A2 * (2.0 * phi).cos()
     })
-}
-
-pub(crate) const fn frect_new() -> SDL_FRect {
-    SDL_FRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
 }
