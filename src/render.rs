@@ -30,6 +30,9 @@ pub(crate) struct Renderer {
     /// Background color.
     background: Color,
 
+    /// Gain of the audio.
+    gain: f32,
+
     // Miscellaneous state info.
     highest_bin: usize,
     lowest_bin: usize,
@@ -65,6 +68,7 @@ impl Renderer {
             smoothed,
             tau,
             background,
+            gain: 1.0,
             lowest_bin,
             highest_bin,
         }
@@ -85,7 +89,7 @@ impl Renderer {
         self.path.move_to((0.0, 0.5 * height));
 
         for (i, bin) in ft[self.lowest_bin..self.highest_bin].iter().enumerate() {
-            let y = self.tau * self.smoothed[i] + (1.0 - self.tau) * bin.abs() * NORMALIZATION;
+            let y = self.tau * self.smoothed[i] + (1.0 - self.tau) * self.gain * bin.abs() * NORMALIZATION;
             self.smoothed[i] = y;
 
             self.path.line_to((x, 0.5 * height * (1.0 - sign * y)));
@@ -100,5 +104,9 @@ impl Renderer {
 
     pub(crate) fn set_surface(&mut self, surface: Surface) {
         self.surface = surface;
+    }
+    
+    pub(crate) fn set_gain(&mut self, gain: f32) {
+        self.gain = gain;
     }
 }

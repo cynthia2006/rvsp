@@ -148,6 +148,8 @@ fn main() {
         args.bg,
     );
 
+    let mut gain = 1.0;
+
     'running: loop {
         for event in sdl_events.poll_iter() {
             match event {
@@ -171,6 +173,16 @@ fn main() {
                     }
                     _ => {}
                 },
+                Event::KeyDown { keycode: Some(Keycode::J), .. } => {
+                    gain -= 1.0;
+
+                    renderer.set_gain(gain);
+                },
+                Event::KeyDown { keycode: Some(Keycode::K), .. } => {
+                    gain += 1.0;
+
+                    renderer.set_gain(gain);
+                }
                 _ => {}
             }
         }
