@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
 
+use circular_buffer::CircularBuffer;
 use gl::types::GLint;
 
 use sdl2::audio::{AudioCallback, AudioSpecDesired};
@@ -13,19 +14,17 @@ use skia_safe::gpu::gl::FramebufferInfo;
 use skia_safe::gpu::{self, backend_render_targets, SurfaceOrigin};
 use skia_safe::{Color, ColorType, Paint, PaintStyle, Path, Surface};
 
-
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const FG: Color = Color::BLACK;
 const BG: Color = Color::YELLOW;
 
 const SAMPLERATE: i32 = 48000;
-const FFT_SIZE: u16 = 2048;
+const FFT_SIZE: usize = 2048;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000; 
 const NORMALIZATION: f32 = 2.0 / FFT_SIZE as f32;
 const SMOOTHING_TIME_CONST: f32 = 0.6;
-
 
 fn get_window_title(gain: f32) -> String {
     format!(
@@ -57,21 +56,19 @@ fn blackman_window(n: usize) -> impl Iterator<Item = f32> {
         A0 - A1 * phi.cos() + A2 * (2.0 * phi).cos()
     })
 }
+struct AudioRecorder<const N: usize>(CircularBuffer::<N, f32>);
 
-struct Callback(pub Vec<f32>);
+impl<const N: usize> AudioRecorder<N> { 
+    fn default() -> Self {
+        Self (CircularBuffer::<N, f32>::new())
+    }
+}
 
-impl AudioCallback for Callback {
+impl<const N: usize> AudioCallback for AudioRecorder<N> {
     type Channel = f32;
 
     fn callback(&mut self, samples: &mut [Self::Channel]) {
-        if samples.len() > self.0.len() {
-            self.0.clear();
-            self.0
-                .extend(samples.iter().nth(samples.len() - self.0.len()));
-        } else {
-            self.0.drain(0..samples.len());
-            self.0.extend(samples.iter());
-        }
+        self.0.extend_from_slice(&samples);
     }
 }
 
@@ -100,7 +97,7 @@ fn main() {
     
     plot_paint
         .set_color(FG)
-        .set_stroke_width(1.2)
+        .set_stroke_width(1.25)
         .set_style(PaintStyle::Stroke)
         .set_anti_alias(true);
 
@@ -111,9 +108,9 @@ fn main() {
             &AudioSpecDesired {
                 channels: Some(1),
                 freq: Some(SAMPLERATE),
-                samples: Some(FFT_SIZE / 2),
+                samples: Some(FFT_SIZE as u16 / 2),
             },
-            |_| Callback(fft.make_input_vec()),
+            |_| AudioRecorder::<FFT_SIZE>::default(),
         )
         .unwrap();
 
