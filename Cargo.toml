@@ -12,6 +12,7 @@ keywords = ["audio", "fft", "sdl2", "visualizer"]
 [dependencies]
 realfft = "3.4.0"
 sdl2 = "0.37.0"
+circular-buffer = "0.1.9"
 skia-safe = { version = "0.81.0", features = ["wayland", "gpu"] }
 
 [dependencies.gl]
