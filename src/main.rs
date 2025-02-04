@@ -16,6 +16,7 @@ use skia_safe::{Color, ColorType, Paint, PaintStyle, Path, Surface};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+const MARGIN_VW: f32 = 0.01;
 const FG: Color = Color::BLACK;
 const BG: Color = Color::YELLOW;
 
@@ -44,23 +45,18 @@ fn find_sdl_gl_driver() -> Option<u32> {
     None
 }
 
-// https://webaudio.github.io/web-audio-api/#blackman-window
-fn blackman_window(n: usize) -> impl Iterator<Item = f32> {
-    const A0: f32 = 0.42f32;
-    const A1: f32 = 0.5f32;
-    const A2: f32 = 0.08f32;
-
+fn hann_window(n: usize) -> impl Iterator<Item = f32> {
     (0..n).map(move |i| {
-        let phi: f32 = 2.0 * PI * i as f32 / n as f32;
+        let y: f32 = (PI * i as f32 / n as f32).sin();
 
-        A0 - A1 * phi.cos() + A2 * (2.0 * phi).cos()
+        y*y
     })
 }
-struct AudioRecorder<const N: usize>(CircularBuffer::<N, f32>);
+struct AudioRecorder<const N: usize>(Box::<CircularBuffer::<N, f32>>);
 
 impl<const N: usize> AudioRecorder<N> { 
     fn default() -> Self {
-        Self (CircularBuffer::<N, f32>::new())
+        Self (CircularBuffer::<N, f32>::boxed())
     }
 }
 
@@ -81,10 +77,11 @@ fn main() {
     let mut planner = RealFftPlanner::new();
     let fft = planner.plan_fft_forward(FFT_SIZE as usize);
     let mut fft_scratch = fft.make_scratch_vec();
-    let blackman_window: Vec<f32> = blackman_window(FFT_SIZE as usize).collect();
+    let hann_window: Vec<f32> = hann_window(FFT_SIZE as usize).collect();
     let mut windowed_signal = fft.make_input_vec();
     let mut frequency_bins = fft.make_output_vec();
-    let mut gain = 9.0;
+    let mut gain = 18.0;
+    let mut gain_multiplier = 10.0.powf(gain / 20.0);
 
     const BIN_WIDTH: f32 = FFT_SIZE as f32 / SAMPLERATE as f32;
     const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
@@ -194,6 +191,8 @@ fn main() {
     
     device.resume();
 
+    let mut is_hidden = false;
+
     'running: loop {
         /* Event Loop Begin */
         for event in sdl_events.poll_iter() {
@@ -213,6 +212,16 @@ fn main() {
                             stencil_size,
                         )
                         .unwrap();
+                    },
+                    WindowEvent::Hidden => {
+                        is_hidden = true;
+
+                        device.pause();
+                    },
+                    WindowEvent::Exposed => {
+                        is_hidden = false;
+
+                        device.resume();
                     }
                     _ => {}
                 },
@@ -221,6 +230,8 @@ fn main() {
                     ..
                 } => {
                     gain += 0.1;
+
+                    gain_multiplier = 10.0.powf(gain / 20.0);
 
                     canvas.window_mut().set_title(&get_window_title(gain)).unwrap();
                 }
@@ -234,17 +245,25 @@ fn main() {
                         gain = 0.0;
                     }
 
+                    gain_multiplier = 10.0.powf(gain / 20.0);
+
                     canvas.window_mut().set_title(&get_window_title(gain)).unwrap();
-                }
+                },
                 _ => {}
             }
         }
+
+        // If the window is hidden, the application should not do anything during that period.
+        if is_hidden {
+            break;
+        }
+
         /* Event Loop End */
 
         let callback_context = device.lock();
 
         for (i, s) in callback_context.0.iter().enumerate() {
-            windowed_signal[i] = blackman_window[i] * (*s);
+            windowed_signal[i] = hann_window[i] * (*s);
         }
 
         // An explicit drop is required because if the lock is held for too long, callback will be inhibited to recieve
@@ -259,7 +278,7 @@ fn main() {
         skia_surface.canvas().draw_color(BG, None);
 
         let (width, height) = (skia_surface.width() as f32, skia_surface.height() as f32);
-        let margin = 0.01 * width;
+        let margin = MARGIN_VW * width;
 
         let x_step = (width - 2.0 * margin) / (HIGH_BIN - LOW_BIN) as f32;
         let mut x = x_step + margin;
@@ -269,7 +288,7 @@ fn main() {
 
         for (i, bin) in frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
             let y = SMOOTHING_TIME_CONST * smoothed_fft[i]
-                + (1.0 - SMOOTHING_TIME_CONST) * gain * bin.abs() * NORMALIZATION;
+                + (1.0 - SMOOTHING_TIME_CONST) * gain_multiplier * bin.abs() * NORMALIZATION;
             
             smoothed_fft[i] = y;
             plot.line_to((x, 0.5 * height * (1.0 - sign * y)));
