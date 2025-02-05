@@ -3,6 +3,7 @@ use std::f32::consts::PI;
 use circular_buffer::CircularBuffer;
 use gl::types::GLint;
 
+use sdl2::video::GLProfile;
 use sdl2::audio::{AudioCallback, AudioSpecDesired};
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::Keycode;
@@ -10,7 +11,8 @@ use sdl2::keyboard::Keycode;
 use realfft::num_complex::ComplexFloat;
 use realfft::RealFftPlanner;
 
-use skia_safe::gpu::gl::FramebufferInfo;
+use skia_safe::gpu::direct_contexts::make_gl;
+use skia_safe::gpu::gl::{FramebufferInfo, Interface};
 use skia_safe::gpu::{self, backend_render_targets, SurfaceOrigin};
 use skia_safe::{Color, ColorType, Paint, PaintStyle, Path, Surface};
 
@@ -34,15 +36,6 @@ fn get_window_title(gain: f32) -> String {
         env!("CARGO_PKG_VERSION"),
         gain
     )
-}
-
-fn find_sdl_gl_driver() -> Option<u32> {
-    for (index, item) in sdl2::render::drivers().enumerate() {
-        if item.name == "opengl" {
-            return Some(index as u32);
-        }
-    }
-    None
 }
 
 fn hann_window(n: usize) -> impl Iterator<Item = f32> {
@@ -111,19 +104,21 @@ fn main() {
         )
         .unwrap();
 
-    let window = sdl_video
+    let gl_attr = sdl_video.gl_attr();
+    gl_attr.set_context_profile(GLProfile::Core);
+    gl_attr.set_context_version(4, 6);
+
+    let mut window = sdl_video
         .window(&get_window_title(gain), WIDTH, HEIGHT)
         .position_centered()
         .resizable()
+        .opengl()
         .build()
         .unwrap();
 
-    let mut canvas = window
-        .into_canvas()
-        .index(find_sdl_gl_driver().unwrap())
-        .present_vsync()
-        .build()
-        .unwrap();
+    // Subsequent calls to OpenGL would be performed under this context.
+    // Although, this variable itself isn't of any use, its existence is.
+    let _opengl_context = window.gl_create_context().unwrap();
 
     let load_gl_proc = |name: &str| {
         sdl_video.gl_get_proc_address(name.as_ref()) as *const _
@@ -131,11 +126,9 @@ fn main() {
 
     gl::load_with(load_gl_proc);
 
-    let interface = skia_safe::gpu::gl::Interface::new_load_with(load_gl_proc).unwrap();
+    let interface = Interface::new_load_with(load_gl_proc).unwrap();
 
-    canvas.window().gl_set_context_to_current().unwrap();
-
-    let mut gr_context = skia_safe::gpu::direct_contexts::make_gl(interface, None).unwrap();
+    let mut gr_context = make_gl(interface, None).unwrap();
     let fb_info = {
         let mut fboid: GLint = 0;
         unsafe {
@@ -233,7 +226,7 @@ fn main() {
 
                     gain_multiplier = 10.0.powf(gain / 20.0);
 
-                    canvas.window_mut().set_title(&get_window_title(gain)).unwrap();
+                    window.set_title(&get_window_title(gain)).unwrap();
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::K),
@@ -247,7 +240,7 @@ fn main() {
 
                     gain_multiplier = 10.0.powf(gain / 20.0);
 
-                    canvas.window_mut().set_title(&get_window_title(gain)).unwrap();
+                    window.set_title(&get_window_title(gain)).unwrap();
                 },
                 _ => {}
             }
@@ -304,6 +297,6 @@ fn main() {
 
         gr_context.flush_and_submit();
 
-        canvas.present();
+        window.gl_swap_window();
     }
 }
