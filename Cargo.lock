@@ -150,24 +150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gl"
-version = "0.14.0"
-source = "git+https://github.com/bjz/gl-rs#1cd256c7b59a0baac8af7863ca0f768bfc1a4b51"
-dependencies = [
- "gl_generator",
-]
-
-[[package]]
-name = "gl_generator"
-version = "0.14.1"
-source = "git+https://github.com/bjz/gl-rs#1cd256c7b59a0baac8af7863ca0f768bfc1a4b51"
-dependencies = [
- "khronos_api",
- "log",
- "xml-rs",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,11 +191,6 @@ name = "itoa"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d75a2a4b1b190afb6f5425f10f6a8f959d2ea0b9c2b1d79553551850539e4674"
-
-[[package]]
-name = "khronos_api"
-version = "3.2.0"
-source = "git+https://github.com/bjz/gl-rs#1cd256c7b59a0baac8af7863ca0f768bfc1a4b51"
 
 [[package]]
 name = "lazy_static"
@@ -441,7 +418,6 @@ name = "rvsp"
 version = "0.1.2"
 dependencies = [
  "circular-buffer",
- "gl",
  "realfft",
  "sdl2",
  "skia-safe",
@@ -733,9 +709,3 @@ dependencies = [
  "linux-raw-sys",
  "rustix",
 ]
-
-[[package]]
-name = "xml-rs"
-version = "0.8.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b940ebc25896e71dd073bad2dbaa2abfe97b0a391415e22ad1326d9c54e3c4"
