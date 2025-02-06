@@ -1,7 +1,6 @@
 use std::f32::consts::PI;
 
 use circular_buffer::CircularBuffer;
-use gl::types::GLint;
 
 use sdl2::video::GLProfile;
 use sdl2::audio::{AudioCallback, AudioSpecDesired};
@@ -39,10 +38,12 @@ fn get_window_title(gain: f32) -> String {
 }
 
 fn hann_window(n: usize) -> impl Iterator<Item = f32> {
-    (0..n).map(move |i| {
-        let y: f32 = (PI * i as f32 / n as f32).sin();
+    const A0: f32 = 0.5;
 
-        y*y
+    (0..n).map(move |i| {
+        let y: f32 = (2.0 * PI * i as f32 / n as f32).cos();
+
+        A0 - (1.0 - A0) * y
     })
 }
 struct AudioRecorder<const N: usize>(Box::<CircularBuffer::<N, f32>>);
@@ -70,7 +71,7 @@ fn main() {
     let mut planner = RealFftPlanner::new();
     let fft = planner.plan_fft_forward(FFT_SIZE as usize);
     let mut fft_scratch = fft.make_scratch_vec();
-    let hann_window: Vec<f32> = hann_window(FFT_SIZE as usize).collect();
+    let window_fn: Vec<f32> = hann_window(FFT_SIZE as usize).collect();
     let mut windowed_signal = fft.make_input_vec();
     let mut frequency_bins = fft.make_output_vec();
     let mut gain = 18.0;
@@ -120,48 +121,22 @@ fn main() {
     // Although, this variable itself isn't of any use, its existence is.
     let _opengl_context = window.gl_create_context().unwrap();
 
-    let load_gl_proc = |name: &str| {
-        sdl_video.gl_get_proc_address(name.as_ref()) as *const _
-    };
+    window.gl_set_context_to_current().unwrap();
 
-    gl::load_with(load_gl_proc);
-
-    let interface = Interface::new_load_with(load_gl_proc).unwrap();
-
-    let mut gr_context = make_gl(interface, None).unwrap();
-    let fb_info = {
-        let mut fboid: GLint = 0;
-        unsafe {
-            gl::GetIntegerv(gl::FRAMEBUFFER_BINDING, &mut fboid);
-        }
-
-        FramebufferInfo {
-            fboid: fboid.try_into().unwrap(),
-            format: skia_safe::gpu::gl::Format::RGBA8.into(),
-            ..Default::default()
-        }
-    };
-
-    let mut stencil_size: GLint = 0;
-
-    unsafe {
-        gl::GetFramebufferAttachmentParameteriv(
-            gl::DRAW_FRAMEBUFFER,
-            gl::STENCIL,
-            gl::FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE,
-            &mut stencil_size,
-        )
-    };
+    let mut gr_context = make_gl(Interface::new_native().unwrap(), None).unwrap();
 
     fn create_surface(
         width: i32,
         height: i32,
-        fb_info: FramebufferInfo,
         gr_context: &mut skia_safe::gpu::DirectContext,
-        stencil_size: i32,
     ) -> Option<Surface> {
+        let fb_info = FramebufferInfo {
+            format: skia_safe::gpu::gl::Format::RGBA8.into(),
+            ..Default::default()
+        };
+
         let backend_render_target =
-            backend_render_targets::make_gl((width, height), None, stencil_size as usize, fb_info);
+            backend_render_targets::make_gl((width, height), None, 0, fb_info);
 
         gpu::surfaces::wrap_backend_render_target(
             gr_context,
@@ -176,9 +151,7 @@ fn main() {
     let mut skia_surface = create_surface(
         WIDTH as i32,
         HEIGHT as i32,
-        fb_info,
-        &mut gr_context,
-        stencil_size,
+        &mut gr_context
     )
     .unwrap();
     
@@ -200,9 +173,7 @@ fn main() {
                         skia_surface = create_surface(
                             w as i32,
                             h as i32,
-                            fb_info,
-                            &mut gr_context,
-                            stencil_size,
+                            &mut gr_context
                         )
                         .unwrap();
                     },
@@ -252,11 +223,10 @@ fn main() {
         }
 
         /* Event Loop End */
-
         let callback_context = device.lock();
 
         for (i, s) in callback_context.0.iter().enumerate() {
-            windowed_signal[i] = hann_window[i] * (*s);
+            windowed_signal[i] = window_fn[i] * (*s);
         }
 
         // An explicit drop is required because if the lock is held for too long, callback will be inhibited to recieve

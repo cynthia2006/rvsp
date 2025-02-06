@@ -14,6 +14,3 @@ realfft = "3.4.0"
 sdl2 = "0.37.0"
 circular-buffer = "0.1.9"
 skia-safe = { version = "0.81.0", features = ["wayland", "gpu"] }
-
-[dependencies.gl]
-git = "https://github.com/bjz/gl-rs"
