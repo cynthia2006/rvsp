@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::f32::consts::{PI, SQRT_2};
 
 use circular_buffer::CircularBuffer;
 
@@ -24,11 +24,12 @@ const BG: Color = Color::YELLOW;
 const SAMPLERATE: i32 = 48000;
 const FFT_SIZE: usize = 2048;
 const MIN_FREQ: i32 = 50;
-const MAX_FREQ: i32 = 10000; 
+const MAX_FREQ: i32 = 10000;
+const GAIN: f32 = 13.0;
 const NORMALIZATION: f32 = 2.0 / FFT_SIZE as f32;
 const SMOOTHING_TIME_CONST: f32 = 0.6;
 
-fn get_window_title(gain: f32) -> String {
+fn make_window_title(gain: f32) -> String {
     format!(
         "{} v{} ({:.2}dB)",
         env!("CARGO_PKG_NAME"),
@@ -46,9 +47,15 @@ fn hann_window(n: usize) -> impl Iterator<Item = f32> {
         A0 - (1.0 - A0) * y
     })
 }
+
+#[inline(always)]
+fn db_rms_to_factor(rms: f32) -> f32 {
+    SQRT_2 * 10.0.powf(rms / 20.0)
+}
+
 struct AudioRecorder<const N: usize>(Box::<CircularBuffer::<N, f32>>);
 
-impl<const N: usize> AudioRecorder<N> { 
+impl<const N: usize> AudioRecorder<N> {
     fn default() -> Self {
         Self (CircularBuffer::<N, f32>::boxed())
     }
@@ -74,21 +81,21 @@ fn main() {
     let window_fn: Vec<f32> = hann_window(FFT_SIZE as usize).collect();
     let mut windowed_signal = fft.make_input_vec();
     let mut frequency_bins = fft.make_output_vec();
-    let mut gain = 18.0;
-    let mut gain_multiplier = 10.0.powf(gain / 20.0);
+    let mut gain = GAIN;
+    let mut gain_multiplier = db_rms_to_factor(gain);
 
     const BIN_WIDTH: f32 = FFT_SIZE as f32 / SAMPLERATE as f32;
     const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
     const HIGH_BIN: usize = (BIN_WIDTH * MAX_FREQ as f32) as usize;
 
     let mut smoothed_fft = vec![0.0; HIGH_BIN - LOW_BIN];
-    
+
     let mut plot = Path::new();
     let mut plot_paint = Paint::default();
-    
+
     plot_paint
         .set_color(FG)
-        .set_stroke_width(1.25)
+        .set_stroke_width(0.0025)
         .set_style(PaintStyle::Stroke)
         .set_anti_alias(true);
 
@@ -110,7 +117,7 @@ fn main() {
     gl_attr.set_context_version(4, 6);
 
     let mut window = sdl_video
-        .window(&get_window_title(gain), WIDTH, HEIGHT)
+        .window(&make_window_title(gain), WIDTH, HEIGHT)
         .position_centered()
         .resizable()
         .opengl()
@@ -146,15 +153,17 @@ fn main() {
             None,
             None,
         )
+        .map(|mut s| {
+            /* This is so that, OpenGL NDC coordinates are emulated. */
+            s.canvas().scale((width as f32 / 2.0, -height as f32 / 2.0));
+            s.canvas().translate((1.0, -1.0));
+
+            s
+        })
     }
 
-    let mut skia_surface = create_surface(
-        WIDTH as i32,
-        HEIGHT as i32,
-        &mut gr_context
-    )
-    .unwrap();
-    
+    let mut skia_surface = create_surface(WIDTH as i32, HEIGHT as i32, &mut gr_context).unwrap();
+
     device.resume();
 
     let mut is_hidden = false;
@@ -170,18 +179,13 @@ fn main() {
                 } => break 'running,
                 Event::Window { win_event, .. } => match win_event {
                     WindowEvent::Resized(w, h) => {
-                        skia_surface = create_surface(
-                            w as i32,
-                            h as i32,
-                            &mut gr_context
-                        )
-                        .unwrap();
-                    },
+                        skia_surface = create_surface(w as i32, h as i32, &mut gr_context).unwrap();
+                    }
                     WindowEvent::Hidden => {
                         is_hidden = true;
 
                         device.pause();
-                    },
+                    }
                     WindowEvent::Exposed => {
                         is_hidden = false;
 
@@ -195,9 +199,9 @@ fn main() {
                 } => {
                     gain += 0.1;
 
-                    gain_multiplier = 10.0.powf(gain / 20.0);
+                    gain_multiplier = db_rms_to_factor(gain);
 
-                    window.set_title(&get_window_title(gain)).unwrap();
+                    window.set_title(&make_window_title(gain)).unwrap();
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::K),
@@ -209,10 +213,10 @@ fn main() {
                         gain = 0.0;
                     }
 
-                    gain_multiplier = 10.0.powf(gain / 20.0);
+                    gain_multiplier = db_rms_to_factor(gain);
 
-                    window.set_title(&get_window_title(gain)).unwrap();
-                },
+                    window.set_title(&make_window_title(gain)).unwrap();
+                }
                 _ => {}
             }
         }
@@ -234,39 +238,33 @@ fn main() {
         drop(callback_context);
 
         fft.process_with_scratch(&mut windowed_signal, &mut frequency_bins, &mut fft_scratch)
-           .unwrap();
+            .unwrap();
 
         /* Drawing calls begin */
-
         skia_surface.canvas().draw_color(BG, None);
 
-        let (width, height) = (skia_surface.width() as f32, skia_surface.height() as f32);
-        let margin = MARGIN_VW * width;
-
-        let x_step = (width - 2.0 * margin) / (HIGH_BIN - LOW_BIN) as f32;
-        let mut x = x_step + margin;
+        const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / (HIGH_BIN - LOW_BIN) as f32;
+        let mut x = X_STEP + MARGIN_VW - 1.0;
         let mut sign = 1.0;
 
-        plot.move_to((margin, 0.5 * height));
+        plot.move_to((MARGIN_VW - 1.0, 0.0));
 
         for (i, bin) in frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
             let y = SMOOTHING_TIME_CONST * smoothed_fft[i]
                 + (1.0 - SMOOTHING_TIME_CONST) * gain_multiplier * bin.abs() * NORMALIZATION;
-            
-            smoothed_fft[i] = y;
-            plot.line_to((x, 0.5 * height * (1.0 - sign * y)));
 
-            x += x_step;
+            smoothed_fft[i] = y;
+            plot.line_to((x, sign * y));
+
+            x += X_STEP;
             sign *= -1.0;
         }
 
         skia_surface.canvas().draw_path(&plot, &plot_paint);
-        plot.reset();
-
+        plot.rewind();
         /* Drawing calls end */
 
         gr_context.flush_and_submit();
-
         window.gl_swap_window();
     }
 }
