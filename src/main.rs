@@ -7,7 +7,7 @@ use sdl3::audio::{AudioFormat, AudioRecordingCallback, AudioSpec, AudioStream};
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::Keycode;
 
-use realfft::num_complex::ComplexFloat;
+use realfft::num_complex::{Complex32, ComplexFloat};
 use realfft::RealFftPlanner;
 
 use skia_safe::gpu::direct_contexts::make_gl;
@@ -53,28 +53,33 @@ fn db_rms_to_factor(rms: f32) -> f32 {
     SQRT_2 * 10.0.powf(rms / 20.0)
 }
 
-struct AudioRecorder<const N: usize> {
-    buffer: Vec<f32>,
-    window: Box::<CircularBuffer::<N, f32>>
+struct AudioRecorder<const N1: usize, const N2: usize> {
+    window: Box::<CircularBuffer::<N1, f32>>,
+    buffer: Box::<[f32; N2]>,
+    buf_pos: usize,
 }
 
-impl<const N: usize> AudioRecorder<N> {
+impl<const N1: usize, const N2: usize> AudioRecorder<N1, N2> {
     fn default() -> Self {
         Self {
-            buffer: Vec::new(),
-            window: CircularBuffer::<N, f32>::boxed()
+            window: CircularBuffer::boxed(),
+            buffer: Box::new([0.0; N2]),
+            buf_pos: 0,
         }
     }
 }
 
-impl<const N: usize> AudioRecordingCallback<f32> for AudioRecorder<N> {
-    fn callback(&mut self, stream: &mut AudioStream, avail: i32) {
-        self.buffer.resize(avail as usize, 0.0);
+impl<const N1: usize, const N2: usize> AudioRecordingCallback<f32> for AudioRecorder<N1, N2> {
+    fn callback(&mut self, stream: &mut AudioStream, _available: i32) {
+        let buf_len = self.buffer.len();
+        let samples_read = stream.read_f32_samples(&mut self.buffer[self.buf_pos..]).unwrap();
 
-        let samples_read = stream.read_f32_samples(&mut self.buffer).unwrap();
-        assert_eq!(samples_read, avail as usize);
-
-        self.window.extend_from_slice(&self.buffer);
+        self.buf_pos = (self.buf_pos + samples_read) % buf_len;
+        
+        // Only push-back if complete (ensures 50% overlap).
+        if self.buf_pos == 0 {
+            self.window.extend_from_slice(&*self.buffer);
+        }
     }
 }
 
@@ -88,8 +93,8 @@ fn main() {
     let fft = planner.plan_fft_forward(FFT_SIZE as usize);
     let mut fft_scratch = fft.make_scratch_vec();
     let window_fn: Vec<f32> = hann_window(FFT_SIZE as usize).collect();
-    let mut windowed_signal = fft.make_input_vec();
-    let mut frequency_bins = fft.make_output_vec();
+    let mut windowed_signal = Box::new([0.0; FFT_SIZE]);
+    let mut frequency_bins = Box::new([Complex32::default(); FFT_SIZE / 2 + 1]);
     let mut gain = GAIN;
     let mut gain_multiplier = db_rms_to_factor(gain);
 
@@ -108,7 +113,7 @@ fn main() {
         .set_style(PaintStyle::Stroke)
         .set_anti_alias(true);
 
-        
+    const BUF_SIZE: usize = FFT_SIZE / 2;        
     let mut stream = sdl_audio
         .open_recording_stream(
             &AudioSpec {
@@ -116,7 +121,7 @@ fn main() {
                 freq: Some(SAMPLERATE),
                 format: Some(AudioFormat::f32_sys())
             },
-            AudioRecorder::<FFT_SIZE>::default(),
+            AudioRecorder::<FFT_SIZE, BUF_SIZE>::default(),
         )
         .unwrap();
 
@@ -202,10 +207,6 @@ fn main() {
                 } => {
                     gain -= 0.1;
 
-                    if gain < 0.0 {
-                        gain = 0.0;
-                    }
-
                     gain_multiplier = db_rms_to_factor(gain);
 
                     window.set_title(&make_window_title(gain)).unwrap();
@@ -225,7 +226,7 @@ fn main() {
         // data on time, ultimately causing horrendous lags.
         drop(callback_context);
 
-        fft.process_with_scratch(&mut windowed_signal, &mut frequency_bins, &mut fft_scratch)
+        fft.process_with_scratch(&mut *windowed_signal, &mut *frequency_bins, &mut fft_scratch)
             .unwrap();
 
         /* Drawing calls begin */
