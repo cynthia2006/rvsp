@@ -2,10 +2,10 @@ use std::f32::consts::{PI, SQRT_2};
 
 use circular_buffer::CircularBuffer;
 
-use sdl2::video::GLProfile;
-use sdl2::audio::{AudioCallback, AudioSpecDesired};
-use sdl2::event::{Event, WindowEvent};
-use sdl2::keyboard::Keycode;
+use sdl3::video::GLProfile;
+use sdl3::audio::{AudioFormat, AudioRecordingCallback, AudioSpec, AudioStream};
+use sdl3::event::{Event, WindowEvent};
+use sdl3::keyboard::Keycode;
 
 use realfft::num_complex::ComplexFloat;
 use realfft::RealFftPlanner;
@@ -25,7 +25,7 @@ const SAMPLERATE: i32 = 48000;
 const FFT_SIZE: usize = 2048;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
-const GAIN: f32 = 13.0;
+const GAIN: f32 = 20.0;
 const NORMALIZATION: f32 = 2.0 / FFT_SIZE as f32;
 const SMOOTHING_TIME_CONST: f32 = 0.6;
 
@@ -53,24 +53,33 @@ fn db_rms_to_factor(rms: f32) -> f32 {
     SQRT_2 * 10.0.powf(rms / 20.0)
 }
 
-struct AudioRecorder<const N: usize>(Box::<CircularBuffer::<N, f32>>);
+struct AudioRecorder<const N: usize> {
+    buffer: Vec<f32>,
+    window: Box::<CircularBuffer::<N, f32>>
+}
 
 impl<const N: usize> AudioRecorder<N> {
     fn default() -> Self {
-        Self (CircularBuffer::<N, f32>::boxed())
+        Self {
+            buffer: Vec::new(),
+            window: CircularBuffer::<N, f32>::boxed()
+        }
     }
 }
 
-impl<const N: usize> AudioCallback for AudioRecorder<N> {
-    type Channel = f32;
+impl<const N: usize> AudioRecordingCallback<f32> for AudioRecorder<N> {
+    fn callback(&mut self, stream: &mut AudioStream, avail: i32) {
+        self.buffer.resize(avail as usize, 0.0);
 
-    fn callback(&mut self, samples: &mut [Self::Channel]) {
-        self.0.extend_from_slice(&samples);
+        let samples_read = stream.read_f32_samples(&mut self.buffer).unwrap();
+        assert_eq!(samples_read, avail as usize);
+
+        self.window.extend_from_slice(&self.buffer);
     }
 }
 
 fn main() {
-    let sdl = sdl2::init().unwrap();
+    let sdl = sdl3::init().unwrap();
     let sdl_audio = sdl.audio().unwrap();
     let sdl_video = sdl.video().unwrap();
     let mut sdl_events = sdl.event_pump().unwrap();
@@ -99,16 +108,15 @@ fn main() {
         .set_style(PaintStyle::Stroke)
         .set_anti_alias(true);
 
-
-    let mut device = sdl_audio
-        .open_capture(
-            None,
-            &AudioSpecDesired {
+        
+    let mut stream = sdl_audio
+        .open_recording_stream(
+            &AudioSpec {
                 channels: Some(1),
                 freq: Some(SAMPLERATE),
-                samples: Some(FFT_SIZE as u16 / 2),
+                format: Some(AudioFormat::f32_sys())
             },
-            |_| AudioRecorder::<FFT_SIZE>::default(),
+            AudioRecorder::<FFT_SIZE>::default(),
         )
         .unwrap();
 
@@ -164,9 +172,7 @@ fn main() {
 
     let mut skia_surface = create_surface(WIDTH as i32, HEIGHT as i32, &mut gr_context).unwrap();
 
-    device.resume();
-
-    let mut is_hidden = false;
+    stream.resume().unwrap();
 
     'running: loop {
         /* Event Loop Begin */
@@ -177,21 +183,8 @@ fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::Window { win_event, .. } => match win_event {
-                    WindowEvent::Resized(w, h) => {
-                        skia_surface = create_surface(w as i32, h as i32, &mut gr_context).unwrap();
-                    }
-                    WindowEvent::Hidden => {
-                        is_hidden = true;
-
-                        device.pause();
-                    }
-                    WindowEvent::Exposed => {
-                        is_hidden = false;
-
-                        device.resume();
-                    }
-                    _ => {}
+                Event::Window { win_event: WindowEvent::Resized(w, h), .. } => {
+                    skia_surface = create_surface(w as i32, h as i32, &mut gr_context).unwrap()
                 },
                 Event::KeyDown {
                     keycode: Some(Keycode::J),
@@ -221,18 +214,13 @@ fn main() {
             }
         }
 
-        // If the window is hidden, the application should not do anything during that period.
-        if is_hidden {
-            break;
-        }
-
         /* Event Loop End */
-        let callback_context = device.lock();
+        let callback_context = stream.lock().unwrap();
 
-        for (i, s) in callback_context.0.iter().enumerate() {
+        for (i, s) in callback_context.window.iter().enumerate() {
             windowed_signal[i] = window_fn[i] * (*s);
         }
-
+        
         // An explicit drop is required because if the lock is held for too long, callback will be inhibited to recieve
         // data on time, ultimately causing horrendous lags.
         drop(callback_context);
