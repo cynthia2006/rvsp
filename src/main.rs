@@ -5,7 +5,7 @@ use std::ptr;
 use circular_buffer::CircularBuffer;
 
 use sdl3::audio::{AudioFormat, AudioRecordingCallback, AudioSpec, AudioStream};
-use sdl3::event::Event;
+use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::Keycode;
 use sdl3::video::GLProfile;
 
@@ -90,10 +90,11 @@ impl<const N1: usize, const N2: usize> AudioRecordingCallback<f32> for AudioReco
 lazy_static! {
     static ref VERTEX_SHADER_SRC: CString = CString::new(
         r"#version 330 core
-    layout (location = 0) in vec2 coord;
+    layout (location = 0) in float x;
+    layout (location = 1) in float y;
 
     void main() {
-        gl_Position = vec4(coord.xy, 0.0f, 1.0f);
+        gl_Position = vec4(x, y, 0.0f, 1.0f);
     }
     "
     )
@@ -130,7 +131,7 @@ fn main() {
     const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
 
     let mut smoothed_fft = vec![0.0; BANDWIDTH];
-    let mut plot = [0f32; 2 * BANDWIDTH];
+    let mut plot = [0f32; BANDWIDTH + 1];
 
     const BUF_SIZE: usize = FFT_SIZE / 2;
     let mut stream = sdl_audio
@@ -153,7 +154,7 @@ fn main() {
     let mut window = sdl_video
         .window(&make_window_title(gain), WIDTH, HEIGHT)
         .position_centered()
-        // .resizable()
+        .resizable()
         .opengl()
         .build()
         .unwrap();
@@ -165,7 +166,8 @@ fn main() {
     gl::load_with(|name| sdl_video.gl_get_proc_address(name).unwrap() as *const _);
 
     let mut vao = 0;
-    let mut vbo = 0;
+    let mut vbo_x = 0;
+    let mut vbo_y = 0;
     let program = unsafe { gl::CreateProgram() };
 
     unsafe {
@@ -193,21 +195,52 @@ fn main() {
 
         gl::DeleteShader(vertex_shader);
         gl::DeleteShader(fragment_shader);
+    }
 
+    /* Generate X coordinates once; reused by GPU infinite times. */
+    plot[0] = MARGIN_VW - 1.0;
+
+    const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / BANDWIDTH as f32;
+    let mut x = X_STEP + MARGIN_VW - 1.0;
+    
+    for x_coord in plot[1..].iter_mut() {
+        *x_coord = x;
+        x += X_STEP;
+    }
+
+    unsafe {
         gl::GenVertexArrays(1, &mut vao);
-        gl::GenBuffers(1, &mut vbo);
+        gl::GenBuffers(1, &mut vbo_x);
+        gl::GenBuffers(1, &mut vbo_y);
 
         gl::BindVertexArray(vao);
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo_x);
+        gl::BufferData(
+            gl::ARRAY_BUFFER,
+            (plot.len() * size_of::<f32>()) as isize,
+            plot.as_ptr() as *const _,
+            gl::STATIC_DRAW,
+        );
         gl::VertexAttribPointer(
             0,
-            2,
+            1,
             gl::FLOAT,
             gl::FALSE,
-            2 * size_of::<f32>() as i32,
+            size_of::<f32>() as i32,
             0 as *const _,
         );
         gl::EnableVertexAttribArray(0);
+
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo_y);
+        gl::VertexAttribPointer(
+            1,
+            1,
+            gl::FLOAT,
+            gl::FALSE,
+            size_of::<f32>() as i32,
+            0 as *const _,
+        );
+        gl::EnableVertexAttribArray(1);
 
         gl::LineWidth(LINE_WIDTH);
         gl::UseProgram(program);
@@ -224,6 +257,11 @@ fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::Window { win_event: WindowEvent::Resized(w, h), .. } => {
+                    unsafe {
+                        gl::Viewport(0, 0, w, h);
+                    }
+                },
                 Event::KeyDown {
                     keycode: Some(Keycode::J),
                     ..
@@ -268,20 +306,16 @@ fn main() {
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
-        const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / (HIGH_BIN - LOW_BIN) as f32;
-        let mut x = X_STEP + MARGIN_VW - 1.0;
         let mut sign = 1.0;
 
+        plot[0] = 0.0;
         for (i, bin) in frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
             let y = SMOOTHING_TIME_CONST * smoothed_fft[i]
                 + (1.0 - SMOOTHING_TIME_CONST) * gain_mult * bin.abs() * NORMALIZATION;
 
             smoothed_fft[i] = y;
+            plot[i + 1] = sign * y;
 
-            plot[2 * i] = x;
-            plot[2 * i + 1] = sign * y;
-
-            x += X_STEP;
             sign *= -1.0;
         }
 
