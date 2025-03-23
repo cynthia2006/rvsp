@@ -1,25 +1,27 @@
 use std::f32::consts::{PI, SQRT_2};
+use std::ffi::CString;
+use std::ptr;
 
 use circular_buffer::CircularBuffer;
 
-use sdl3::video::GLProfile;
 use sdl3::audio::{AudioFormat, AudioRecordingCallback, AudioSpec, AudioStream};
-use sdl3::event::{Event, WindowEvent};
+use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
+use sdl3::video::GLProfile;
 
 use realfft::num_complex::{Complex32, ComplexFloat};
 use realfft::RealFftPlanner;
 
-use skia_safe::gpu::direct_contexts::make_gl;
-use skia_safe::gpu::gl::{FramebufferInfo, Interface};
-use skia_safe::gpu::{self, backend_render_targets, SurfaceOrigin};
-use skia_safe::{Color, ColorType, Paint, PaintStyle, Path, Surface};
+use gl;
+
+use lazy_static::lazy_static;
+
+mod utils;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const MARGIN_VW: f32 = 0.01;
-const FG: Color = Color::BLACK;
-const BG: Color = Color::YELLOW;
+const LINE_WIDTH: f32 = 1.5;
 
 const SAMPLERATE: i32 = 48000;
 const FFT_SIZE: usize = 2048;
@@ -54,8 +56,8 @@ fn db_rms_to_factor(rms: f32) -> f32 {
 }
 
 struct AudioRecorder<const N1: usize, const N2: usize> {
-    window: Box::<CircularBuffer::<N1, f32>>,
-    buffer: Box::<[f32; N2]>,
+    window: Box<CircularBuffer<N1, f32>>,
+    buffer: Box<[f32; N2]>,
     buf_pos: usize,
 }
 
@@ -72,15 +74,39 @@ impl<const N1: usize, const N2: usize> AudioRecorder<N1, N2> {
 impl<const N1: usize, const N2: usize> AudioRecordingCallback<f32> for AudioRecorder<N1, N2> {
     fn callback(&mut self, stream: &mut AudioStream, _available: i32) {
         let buf_len = self.buffer.len();
-        let samples_read = stream.read_f32_samples(&mut self.buffer[self.buf_pos..]).unwrap();
+        let samples_read = stream
+            .read_f32_samples(&mut self.buffer[self.buf_pos..])
+            .unwrap();
 
         self.buf_pos = (self.buf_pos + samples_read) % buf_len;
-        
+
         // Only push-back if complete (ensures 50% overlap).
         if self.buf_pos == 0 {
             self.window.extend_from_slice(&*self.buffer);
         }
     }
+}
+
+lazy_static! {
+    static ref VERTEX_SHADER_SRC: CString = CString::new(
+        r"#version 330 core
+    layout (location = 0) in vec2 coord;
+
+    void main() {
+        gl_Position = vec4(coord.xy, 0.0f, 1.0f);
+    }
+    "
+    )
+    .unwrap();
+    static ref FRAGMENT_SHADER_SRC: CString = CString::new(
+        r"#version 330 core
+    out vec4 FragColor;
+
+    void main() {
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }"
+    )
+    .unwrap();
 }
 
 fn main() {
@@ -96,30 +122,23 @@ fn main() {
     let mut windowed_signal = Box::new([0.0; FFT_SIZE]);
     let mut frequency_bins = Box::new([Complex32::default(); FFT_SIZE / 2 + 1]);
     let mut gain = GAIN;
-    let mut gain_multiplier = db_rms_to_factor(gain);
+    let mut gain_mult = db_rms_to_factor(gain);
 
     const BIN_WIDTH: f32 = FFT_SIZE as f32 / SAMPLERATE as f32;
     const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
     const HIGH_BIN: usize = (BIN_WIDTH * MAX_FREQ as f32) as usize;
+    const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
 
-    let mut smoothed_fft = vec![0.0; HIGH_BIN - LOW_BIN];
+    let mut smoothed_fft = vec![0.0; BANDWIDTH];
+    let mut plot = [0f32; 2 * BANDWIDTH];
 
-    let mut plot = Path::new();
-    let mut plot_paint = Paint::default();
-
-    plot_paint
-        .set_color(FG)
-        .set_stroke_width(0.0025)
-        .set_style(PaintStyle::Stroke)
-        .set_anti_alias(true);
-
-    const BUF_SIZE: usize = FFT_SIZE / 2;        
+    const BUF_SIZE: usize = FFT_SIZE / 2;
     let mut stream = sdl_audio
         .open_recording_stream(
             &AudioSpec {
                 channels: Some(1),
                 freq: Some(SAMPLERATE),
-                format: Some(AudioFormat::f32_sys())
+                format: Some(AudioFormat::f32_sys()),
             },
             AudioRecorder::<FFT_SIZE, BUF_SIZE>::default(),
         )
@@ -127,12 +146,14 @@ fn main() {
 
     let gl_attr = sdl_video.gl_attr();
     gl_attr.set_context_profile(GLProfile::Core);
-    gl_attr.set_context_version(4, 6);
+    gl_attr.set_context_version(3, 3);
+    gl_attr.set_multisample_buffers(1);
+    gl_attr.set_multisample_samples(2);
 
     let mut window = sdl_video
         .window(&make_window_title(gain), WIDTH, HEIGHT)
         .position_centered()
-        .resizable()
+        // .resizable()
         .opengl()
         .build()
         .unwrap();
@@ -141,41 +162,56 @@ fn main() {
     // Although, this variable itself isn't of any use, its existence is.
     let _opengl_context = window.gl_create_context().unwrap();
 
-    window.gl_set_context_to_current().unwrap();
+    gl::load_with(|name| sdl_video.gl_get_proc_address(name).unwrap() as *const _);
 
-    let mut gr_context = make_gl(Interface::new_native().unwrap(), None).unwrap();
+    let mut vao = 0;
+    let mut vbo = 0;
+    let program = unsafe { gl::CreateProgram() };
 
-    fn create_surface(
-        width: i32,
-        height: i32,
-        gr_context: &mut skia_safe::gpu::DirectContext,
-    ) -> Option<Surface> {
-        let fb_info = FramebufferInfo {
-            format: skia_safe::gpu::gl::Format::RGBA8.into(),
-            ..Default::default()
-        };
+    unsafe {
+        let vertex_shader = gl::CreateShader(gl::VERTEX_SHADER);
+        let fragment_shader = gl::CreateShader(gl::FRAGMENT_SHADER);
 
-        let backend_render_target =
-            backend_render_targets::make_gl((width, height), None, 0, fb_info);
+        gl::ShaderSource(vertex_shader, 1, &VERTEX_SHADER_SRC.as_ptr(), ptr::null());
+        gl::CompileShader(vertex_shader);
+        utils::ensure_shader_compilation(vertex_shader).expect("Vertex shader compilation failed");
 
-        gpu::surfaces::wrap_backend_render_target(
-            gr_context,
-            &backend_render_target,
-            SurfaceOrigin::BottomLeft,
-            ColorType::N32,
-            None,
-            None,
-        )
-        .map(|mut s| {
-            /* This is so that, OpenGL NDC coordinates are emulated. */
-            s.canvas().scale((width as f32 / 2.0, -height as f32 / 2.0));
-            s.canvas().translate((1.0, -1.0));
+        gl::ShaderSource(
+            fragment_shader,
+            1,
+            &FRAGMENT_SHADER_SRC.as_ptr(),
+            ptr::null(),
+        );
+        gl::CompileShader(fragment_shader);
+        utils::ensure_shader_compilation(fragment_shader)
+            .expect("Fragment shader compilation failed");
 
-            s
-        })
+        gl::AttachShader(program, vertex_shader);
+        gl::AttachShader(program, fragment_shader);
+        gl::LinkProgram(program);
+        utils::ensure_shader_linking(program).expect("Shader linking failed");
+
+        gl::DeleteShader(vertex_shader);
+        gl::DeleteShader(fragment_shader);
+
+        gl::GenVertexArrays(1, &mut vao);
+        gl::GenBuffers(1, &mut vbo);
+
+        gl::BindVertexArray(vao);
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl::VertexAttribPointer(
+            0,
+            2,
+            gl::FLOAT,
+            gl::FALSE,
+            2 * size_of::<f32>() as i32,
+            0 as *const _,
+        );
+        gl::EnableVertexAttribArray(0);
+
+        gl::LineWidth(LINE_WIDTH);
+        gl::UseProgram(program);
     }
-
-    let mut skia_surface = create_surface(WIDTH as i32, HEIGHT as i32, &mut gr_context).unwrap();
 
     stream.resume().unwrap();
 
@@ -188,16 +224,13 @@ fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::Window { win_event: WindowEvent::Resized(w, h), .. } => {
-                    skia_surface = create_surface(w as i32, h as i32, &mut gr_context).unwrap()
-                },
                 Event::KeyDown {
                     keycode: Some(Keycode::J),
                     ..
                 } => {
                     gain += 0.1;
 
-                    gain_multiplier = db_rms_to_factor(gain);
+                    gain_mult = db_rms_to_factor(gain);
 
                     window.set_title(&make_window_title(gain)).unwrap();
                 }
@@ -207,7 +240,7 @@ fn main() {
                 } => {
                     gain -= 0.1;
 
-                    gain_multiplier = db_rms_to_factor(gain);
+                    gain_mult = db_rms_to_factor(gain);
 
                     window.set_title(&make_window_title(gain)).unwrap();
                 }
@@ -217,43 +250,51 @@ fn main() {
 
         /* Event Loop End */
         let callback_context = stream.lock().unwrap();
-
         for (i, s) in callback_context.window.iter().enumerate() {
             windowed_signal[i] = window_fn[i] * (*s);
         }
-        
-        // An explicit drop is required because if the lock is held for too long, callback will be inhibited to recieve
-        // data on time, ultimately causing horrendous lags.
         drop(callback_context);
 
-        fft.process_with_scratch(&mut *windowed_signal, &mut *frequency_bins, &mut fft_scratch)
-            .unwrap();
+        fft.process_with_scratch(
+            &mut *windowed_signal,
+            &mut *frequency_bins,
+            &mut fft_scratch,
+        )
+        .unwrap();
 
         /* Drawing calls begin */
-        skia_surface.canvas().draw_color(BG, None);
+        unsafe {
+            gl::ClearColor(1.0, 1.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+        }
 
         const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / (HIGH_BIN - LOW_BIN) as f32;
         let mut x = X_STEP + MARGIN_VW - 1.0;
         let mut sign = 1.0;
 
-        plot.move_to((MARGIN_VW - 1.0, 0.0));
-
         for (i, bin) in frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
             let y = SMOOTHING_TIME_CONST * smoothed_fft[i]
-                + (1.0 - SMOOTHING_TIME_CONST) * gain_multiplier * bin.abs() * NORMALIZATION;
+                + (1.0 - SMOOTHING_TIME_CONST) * gain_mult * bin.abs() * NORMALIZATION;
 
             smoothed_fft[i] = y;
-            plot.line_to((x, sign * y));
+
+            plot[2 * i] = x;
+            plot[2 * i + 1] = sign * y;
 
             x += X_STEP;
             sign *= -1.0;
         }
 
-        skia_surface.canvas().draw_path(&plot, &plot_paint);
-        plot.rewind();
-        /* Drawing calls end */
+        unsafe {
+            gl::BufferData(
+                gl::ARRAY_BUFFER,
+                (plot.len() * size_of::<f32>()) as isize,
+                plot.as_ptr() as *const _,
+                gl::STREAM_DRAW,
+            );
+            gl::DrawArrays(gl::LINE_STRIP, 0, BANDWIDTH as i32);
+        }
 
-        gr_context.flush_and_submit();
         window.gl_swap_window();
     }
 }
