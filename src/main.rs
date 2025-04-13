@@ -301,4 +301,11 @@ fn main() {
 
         window.gl_swap_window();
     }
+
+    unsafe {
+        gl::DeleteProgram(program);
+        gl::DeleteVertexArrays(1, &vao);
+        gl::DeleteBuffers(1, &vbo_y);
+        gl::DeleteBuffers(1, &vbo_x);
+    }
 }
