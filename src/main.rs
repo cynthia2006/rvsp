@@ -1,19 +1,23 @@
+use std::cell::RefCell;
 use std::f32::consts::{PI, SQRT_2};
-use std::ptr;
+use std::rc::Rc;
 
 use circular_buffer::CircularBuffer;
 
+use glium::implement_vertex;
+use glium::index::{NoIndices, PrimitiveType};
+use glium::uniforms::EmptyUniforms;
+use glium::{DrawParameters, Program, Surface, VertexBuffer};
+
 use sdl3::audio::{AudioFormat, AudioRecordingCallback, AudioSpec, AudioStream};
-use sdl3::event::{Event, WindowEvent};
+use sdl3::event::Event;
 use sdl3::keyboard::Keycode;
 use sdl3::video::GLProfile;
 
 use realfft::num_complex::{Complex32, ComplexFloat};
 use realfft::RealFftPlanner;
 
-use gl;
-
-mod shaders;
+mod sdl_backend;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -110,7 +114,14 @@ fn main() {
     const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
 
     let mut smoothed_fft = vec![0.0; BANDWIDTH];
-    let mut plot = [0f32; BANDWIDTH + 1];
+
+    #[derive(Copy, Clone)]
+    struct Coords {
+        coords: [f32; 2],
+    }
+    implement_vertex!(Coords, coords);
+
+    let mut plot = [Coords { coords: [0.0, 0.0] }; BANDWIDTH + 1];
 
     const BUF_SIZE: usize = FFT_SIZE / 2;
     let mut stream = sdl_audio
@@ -130,90 +141,51 @@ fn main() {
     gl_attr.set_multisample_buffers(1);
     gl_attr.set_multisample_samples(MSAA);
 
-    let mut window = sdl_video
-        .window(&make_window_title(gain), WIDTH, HEIGHT)
-        .position_centered()
-        .resizable()
-        .opengl()
-        .build()
-        .unwrap();
+    let window = Rc::new(RefCell::new(
+        sdl_video
+            .window(&make_window_title(gain), WIDTH, HEIGHT)
+            .position_centered()
+            .resizable()
+            .opengl()
+            .build()
+            .unwrap(),
+    ));
 
-    // Subsequent calls to OpenGL would be performed under this context.
-    // Although, this variable itself isn't of any use, its existence is.
-    let _opengl_context = window.gl_create_context().unwrap();
+    let backend = sdl_backend::SDLBackend::new(window.clone()).unwrap();
+    let display = sdl_backend::Display::new(backend).unwrap();
 
-    gl::load_with(|name| sdl_video.gl_get_proc_address(name).unwrap() as *const _);
+    const VERTEX_SHADER_SRC: &str = r"#version 330 core
+    in vec2 coords;
 
-    let mut vao = 0;
-    let mut vbo_x = 0;
-    let mut vbo_y = 0;
-    let program = unsafe { gl::CreateProgram() };
+    void main() {
+        gl_Position = vec4(coords.x, coords.y, 0.0f, 1.0f);
+    }";
 
-    unsafe {
-        let vertex_shader = gl::CreateShader(gl::VERTEX_SHADER);
-        let fragment_shader = gl::CreateShader(gl::FRAGMENT_SHADER);
+    const FRAGMENT_SHADER_SRC: &str = r"#version 330 core
+    out vec4 FragColor;
 
-        gl::ShaderSource(vertex_shader, 1, &shaders::VERTEX_SHADER_SRC.as_ptr(), ptr::null());
-        gl::CompileShader(vertex_shader);
+    void main() {
+        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }";
 
-        gl::ShaderSource(fragment_shader, 1,&shaders::FRAGMENT_SHADER_SRC.as_ptr(),ptr::null());
-        gl::CompileShader(fragment_shader);
+    let plot_buffer = VertexBuffer::dynamic(&display, &plot).unwrap();
+    let indices = NoIndices(PrimitiveType::LineStrip);
+    let program =
+        Program::from_source(&display, VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC, None).unwrap();
+    let draw_params = DrawParameters {
+        line_width: Some(LINE_WIDTH),
+        ..Default::default()
+    };
 
-        gl::AttachShader(program, vertex_shader);
-        gl::AttachShader(program, fragment_shader);
-        gl::LinkProgram(program);
-
-        gl::DeleteShader(vertex_shader);
-        gl::DeleteShader(fragment_shader);
-    }
-
-    /* Generate X coordinates once; reused by GPU infinite times. */
-    plot[0] = MARGIN_VW - 1.0;
-
+    plot[0].coords = [MARGIN_VW - 1.0, 0.0];
+    
+    /* Preemptively generate X coordinates once, then reused by GPU infinite times. */
     const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / BANDWIDTH as f32;
     let mut x = X_STEP + MARGIN_VW - 1.0;
-    
-    for x_coord in plot[1..].iter_mut() {
-        *x_coord = x;
+
+    for vertex in plot[1..].iter_mut() {
+        vertex.coords[0] = x;
         x += X_STEP;
-    }
-
-    unsafe {
-        gl::GenVertexArrays(1, &mut vao);
-        gl::GenBuffers(1, &mut vbo_x);
-        gl::GenBuffers(1, &mut vbo_y);
-
-        gl::BindVertexArray(vao);
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo_x);
-        gl::BufferData(
-            gl::ARRAY_BUFFER,
-            (plot.len() * size_of::<f32>()) as isize,
-            plot.as_ptr() as *const _,
-            gl::STATIC_DRAW,
-        );
-        gl::VertexAttribPointer(
-            0,
-            1,
-            gl::FLOAT,
-            gl::FALSE,
-            size_of::<f32>() as i32,
-            0 as *const _,
-        );
-        gl::EnableVertexAttribArray(0);
-
-        gl::BindBuffer(gl::ARRAY_BUFFER, vbo_y);
-        gl::VertexAttribPointer(
-            1,
-            1,
-            gl::FLOAT,
-            gl::FALSE,
-            size_of::<f32>() as i32,
-            0 as *const _,
-        );
-        gl::EnableVertexAttribArray(1);
-
-        gl::LineWidth(LINE_WIDTH);
-        gl::UseProgram(program);
     }
 
     stream.resume().unwrap();
@@ -227,11 +199,6 @@ fn main() {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::Window { win_event: WindowEvent::Resized(w, h), .. } => {
-                    unsafe {
-                        gl::Viewport(0, 0, w, h);
-                    }
-                },
                 Event::KeyDown {
                     keycode: Some(Keycode::J),
                     ..
@@ -240,7 +207,10 @@ fn main() {
 
                     gain_mult = db_rms_to_factor(gain);
 
-                    window.set_title(&make_window_title(gain)).unwrap();
+                    window
+                        .borrow_mut()
+                        .set_title(&make_window_title(gain))
+                        .unwrap();
                 }
                 Event::KeyDown {
                     keycode: Some(Keycode::K),
@@ -250,7 +220,10 @@ fn main() {
 
                     gain_mult = db_rms_to_factor(gain);
 
-                    window.set_title(&make_window_title(gain)).unwrap();
+                    window
+                        .borrow_mut()
+                        .set_title(&make_window_title(gain))
+                        .unwrap();
                 }
                 _ => {}
             }
@@ -270,42 +243,30 @@ fn main() {
         )
         .unwrap();
 
-        /* Drawing calls begin */
-        unsafe {
-            gl::ClearColor(1.0, 1.0, 0.0, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
+        let mut frame = display.draw();
+        frame.clear_color(1.0, 1.0, 0.0, 1.0);
 
         let mut sign = 1.0;
-
-        plot[0] = 0.0;
         for (i, bin) in frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
             let y = SMOOTHING_TIME_CONST * smoothed_fft[i]
                 + (1.0 - SMOOTHING_TIME_CONST) * gain_mult * bin.abs() * NORMALIZATION;
 
             smoothed_fft[i] = y;
-            plot[i + 1] = sign * y;
+            plot[i + 1].coords[1] = sign * y;
 
             sign *= -1.0;
         }
 
-        unsafe {
-            gl::BufferData(
-                gl::ARRAY_BUFFER,
-                (plot.len() * size_of::<f32>()) as isize,
-                plot.as_ptr() as *const _,
-                gl::STREAM_DRAW,
-            );
-            gl::DrawArrays(gl::LINE_STRIP, 0, BANDWIDTH as i32);
-        }
-
-        window.gl_swap_window();
-    }
-
-    unsafe {
-        gl::DeleteProgram(program);
-        gl::DeleteVertexArrays(1, &vao);
-        gl::DeleteBuffers(1, &vbo_y);
-        gl::DeleteBuffers(1, &vbo_x);
+        plot_buffer.write(&plot);
+        frame
+            .draw(
+                &plot_buffer,
+                &indices,
+                &program,
+                &EmptyUniforms,
+                &draw_params,
+            )
+            .unwrap();
+        frame.finish().unwrap();
     }
 }

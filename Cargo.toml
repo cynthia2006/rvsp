@@ -1,6 +1,6 @@
 [package]
 name = "rvsp"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Audio spectrum visualizer in Rust"
 authors = ["Cynthia <cynthia2048@proton.me>"]
@@ -13,5 +13,4 @@ keywords = ["audio", "fft", "sdl3", "visualizer"]
 realfft = "3.4.0"
 sdl3 = { version = "0", features = [] }
 circular-buffer = "0.1.9"
-gl = { git = "https://github.com/bjz/gl-rs" }
-lazy_static = "1.5.0"
+glium = { version = "*", features = [], default-features = false }
