@@ -1,24 +1,19 @@
 [package]
 name = "rvsp"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Audio spectrum visualizer in Rust"
 authors = ["Cynthia <cynthia2048@proton.me>"]
 license = "GPL-3.0"
-keywords = ["audio", "fft", "sdl3", "visualizer"]
+keywords = ["audio", "fft", "visualizer"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 realfft = "3.4.0"
-sdl3 = { version = "0", features = [] }
 circular-buffer = "0.1.9"
-
-[dependencies.glium]
-version = "*"
-features = []
-default-features = false
+lazy_static = "1.5.0"
+glium = "*"
 
 [dependencies.pipewire]
 git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs"
-

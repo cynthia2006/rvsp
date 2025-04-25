@@ -3,14 +3,27 @@ use std::f32::consts::{PI, SQRT_2};
 use std::io::Cursor;
 use std::mem;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use circular_buffer::CircularBuffer;
 
+use glium::backend::glutin;
+use glium::backend::glutin::Display;
+use glium::glutin::config::ConfigTemplateBuilder;
+use glium::glutin::surface::WindowSurface;
+use glium::winit::application::ApplicationHandler;
+use glium::winit::dpi::PhysicalSize;
+use glium::winit::event::{KeyEvent, WindowEvent};
+use glium::winit::event_loop::{ActiveEventLoop, EventLoop};
+use glium::winit::keyboard::{KeyCode, PhysicalKey};
+use glium::winit::window::{Window, WindowId};
 use glium::implement_vertex;
 use glium::index::{NoIndices, PrimitiveType};
 use glium::uniforms::EmptyUniforms;
 use glium::{DrawParameters, Program, Surface, VertexBuffer};
+
+use lazy_static::lazy_static;
 
 use pipewire as pw;
 use pipewire::context::Context;
@@ -24,14 +37,8 @@ use pipewire::spa::pod::Pod;
 use pipewire::spa::utils::{Direction, SpaTypes};
 use pipewire::stream::{Stream, StreamFlags, StreamRef};
 
-use sdl3::event::Event;
-use sdl3::keyboard::Keycode;
-use sdl3::video::GLProfile;
-
 use realfft::num_complex::{Complex32, ComplexFloat};
-use realfft::RealFftPlanner;
-
-mod sdl_backend;
+use realfft::{RealFftPlanner, RealToComplex};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -40,51 +47,48 @@ const LINE_WIDTH: f32 = 1.5;
 const MSAA: u8 = 8; // 8x MSAA.
 
 const SAMPLERATE: u32 = 48000;
-const FFT_SIZE: usize = 2048;
+const WINDOW_SIZE: usize = 2048;
+const WINDOW_SIZE_DIV_2: usize = WINDOW_SIZE / 2;
+const FFT_SIZE: usize = WINDOW_SIZE / 2 + 1;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
 const GAIN: f32 = 23.0;
-const NORMALIZATION: f32 = 1.0 / FFT_SIZE as f32;
+const NORMALIZATION: f32 = 1.0 / WINDOW_SIZE as f32;
 const SMOOTHING_TIME_CONST: f32 = 0.6;
 
-fn make_window_title(gain: f32) -> String {
-    format!(
-        "{} v{} ({:.2}dB)",
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-        gain
-    )
+const BIN_WIDTH: f32 = WINDOW_SIZE as f32 / SAMPLERATE as f32;
+const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
+const HIGH_BIN: usize = (BIN_WIDTH * MAX_FREQ as f32) as usize;
+const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
+const BANDWIDTH_PLUS_ONE: usize = BANDWIDTH + 1;
+
+lazy_static! {
+    static ref WINDOW_FN: [f32; WINDOW_SIZE] = (|| {
+        let mut win = [0.0; WINDOW_SIZE];
+        
+        const A0: f32 = 0.5;
+        for (i, w) in win.iter_mut().enumerate() {
+            let x: f32 = (2.0 * PI * i as f32 / WINDOW_SIZE as f32).cos();
+    
+            *w = A0 - (1.0 - A0) * x;
+        }
+    
+        win
+    }) ();
 }
 
-fn hann_window(win: &mut [f32]) {
-    const A0: f32 = 0.5;
-
-    let n = win.len();
-
-    for (i, w) in win.iter_mut().enumerate() {
-        let x: f32 = (2.0 * PI * i as f32 / n as f32).cos();
-
-        *w = A0 - (1.0 - A0) * x;
-    }
-}
-
-#[inline(always)]
-fn db_rms_to_factor(rms: f32) -> f32 {
-    SQRT_2 * 10.0.powf(rms / 20.0)
-}
-
-struct AudioRecorder<const N1: usize, const N2: usize> {
-    window: CircularBuffer<N1, f32>,
+struct AudioRecorder {
+    window: CircularBuffer<WINDOW_SIZE, f32>,
     channels: usize,
-    buffer: [f32; N2],
+    buffer: [f32; WINDOW_SIZE_DIV_2],
 }
 
-impl<const N1: usize, const N2: usize> AudioRecorder<N1, N2> {
-    fn default() -> Self {
+impl AudioRecorder {
+    fn new() -> Self {
         Self {
             window: CircularBuffer::new(),
             channels: 0,
-            buffer: [0.0; N2],
+            buffer: [0.0; WINDOW_SIZE_DIV_2],
         }
     }
 
@@ -118,43 +122,160 @@ impl<const N1: usize, const N2: usize> AudioRecorder<N1, N2> {
     }
 }
 
+#[inline(always)]
+fn db_rms_to_factor(rms: f32) -> f32 {
+    SQRT_2 * 10.0.powf(rms / 20.0)
+}
+
+#[derive(Copy, Clone)]
+struct Coords {
+    coords: [f32; 2],
+}
+implement_vertex!(Coords, coords);
+
+const VERTEX_SHADER_SRC: &str = r"#version 330 core
+in vec2 coords;
+
+void main() {
+    gl_Position = vec4(coords.xy, 0.0f, 1.0f);
+}";
+
+const FRAGMENT_SHADER_SRC: &str = r"#version 330 core
+out vec4 FragColor;
+
+void main() {
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+}";
+
+struct App<'a> {
+    window: Window,
+    display: Display<WindowSurface>,
+    pw_mainloop: MainLoop,
+    audio_rec: Rc<RefCell<AudioRecorder>>,
+    fft: Arc<dyn RealToComplex<f32>>,
+    
+    plot: [Coords; BANDWIDTH_PLUS_ONE],
+    plot_buffer: VertexBuffer<Coords>,
+    indices: NoIndices,
+    program: Program,
+    draw_params: DrawParameters<'a>,
+
+    gain: f32,
+    gain_multiplier: f32,
+    frequency_bins: [Complex32; FFT_SIZE],
+    fft_scratch: Vec<Complex32>,
+    smoothed_fft: [f32; BANDWIDTH],
+    windowed_signal: [f32; WINDOW_SIZE],
+}
+
+impl<'a> App<'a> {
+    fn increase_gain(&mut self, increment: f32) {
+        self.gain += increment;
+        self.gain_multiplier = db_rms_to_factor(self.gain);
+    }
+
+    fn decrease_gain(&mut self, decrement: f32) {
+        self.gain -= decrement;
+        self.gain_multiplier = db_rms_to_factor(self.gain);
+    }
+
+    fn update_window_title(&self) {
+        let title = format!(
+            "{} v{} ({:.2}dB)",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            self.gain
+        );
+
+        self.window.set_title(&title);
+    }
+}
+
+impl<'a> ApplicationHandler for App<'a> {
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        // TODO
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput { 
+                event: KeyEvent { 
+                    physical_key: PhysicalKey::Code(KeyCode::KeyJ), 
+                .. }, 
+            .. } => {
+                self.increase_gain(0.1);
+                self.update_window_title();
+            },
+            WindowEvent::KeyboardInput { 
+                event: KeyEvent { 
+                    physical_key: PhysicalKey::Code(KeyCode::KeyK), 
+                .. }, 
+            .. } => {
+                self.decrease_gain(0.1);
+                self.update_window_title();
+            },
+            WindowEvent::Resized(PhysicalSize { width, height }) => {
+                self.display.resize((width, height));
+            },
+            WindowEvent::RedrawRequested => {
+                let audio_recorder = self.audio_rec.borrow();
+                for (i, s) in audio_recorder.window.iter().enumerate() {
+                    self.windowed_signal[i] = WINDOW_FN[i] * (*s);
+                }
+                drop(audio_recorder);
+
+                self.fft.process_with_scratch(&mut self.windowed_signal, &mut self.frequency_bins, &mut self.fft_scratch)
+                    .unwrap();
+
+                let mut frame = self.display.draw();
+                frame.clear_color(1.0, 1.0, 0.0, 1.0);
+
+                let mut sign = 1.0;
+                for (i, bin) in self.frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
+                    let y = SMOOTHING_TIME_CONST * self.smoothed_fft[i]
+                        + (1.0 - SMOOTHING_TIME_CONST) * self.gain_multiplier * bin.abs() * NORMALIZATION;
+        
+                    self.smoothed_fft[i] = y;
+                    self.plot[i + 1].coords[1] = sign * y;
+        
+                    sign *= -1.0;
+                }
+
+                self.plot_buffer.write(&self.plot);
+                frame
+                    .draw(
+                        &self.plot_buffer,
+                        &self.indices,
+                        &self.program,
+                        &EmptyUniforms,
+                        &self.draw_params,
+                    )
+                    .unwrap();
+
+                self.window.pre_present_notify();
+                frame.finish().unwrap();
+                self.window.request_redraw();
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.pw_mainloop.loop_().iterate(Duration::from_millis(0));
+    }
+}
+
 fn main() {
     pw::init();
 
-    let sdl = sdl3::init().unwrap();
-    let sdl_video = sdl.video().unwrap();
-    let mut sdl_events = sdl.event_pump().unwrap();
-
-    let mut planner = RealFftPlanner::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE as usize);
-    let mut fft_scratch = fft.make_scratch_vec();
-    let mut window_fn = [0.0; FFT_SIZE];
-    let mut windowed_signal = [0.0; FFT_SIZE];
-    let mut frequency_bins = [Complex32::default(); FFT_SIZE / 2 + 1];
-    let mut gain = GAIN;
-    let mut gain_mult = db_rms_to_factor(gain);
-
-    hann_window(&mut window_fn);
-
-    const BIN_WIDTH: f32 = FFT_SIZE as f32 / SAMPLERATE as f32;
-    const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
-    const HIGH_BIN: usize = (BIN_WIDTH * MAX_FREQ as f32) as usize;
-    const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
-
-    let mut smoothed_fft = vec![0.0; BANDWIDTH];
-
-    #[derive(Copy, Clone)]
-    struct Coords {
-        coords: [f32; 2],
-    }
-    implement_vertex!(Coords, coords);
-
-    let mut plot = [Coords { coords: [0.0, 0.0] }; BANDWIDTH + 1];
-
-    const BUF_SIZE: usize = FFT_SIZE / 2;
-
-    let audio_recorder = Rc::new(RefCell::new(AudioRecorder::<FFT_SIZE, BUF_SIZE>::default()));
-    let audio_recorder_clone = audio_recorder.clone();
+    let audio_rec = Rc::new(RefCell::new(AudioRecorder::new()));
+    let audio_rec_clone = audio_rec.clone();
 
     let pw_mainloop = MainLoop::new(None).unwrap();
     let pw_context = Context::new(&pw_mainloop).unwrap();
@@ -178,7 +299,7 @@ fn main() {
 
     // TODO Handle other events on the stream as well, if required.
     let _listener = stream
-        .add_local_listener_with_user_data(audio_recorder_clone)
+        .add_local_listener_with_user_data(audio_rec_clone)
         .param_changed(|_, user_data, id, param| {
             if id != ParamType::Format.as_raw() {
                 return;
@@ -224,38 +345,24 @@ fn main() {
         )
         .unwrap();
 
-    let gl_attr = sdl_video.gl_attr();
-    gl_attr.set_context_profile(GLProfile::Core);
-    gl_attr.set_context_version(3, 3);
-    gl_attr.set_multisample_buffers(1);
-    gl_attr.set_multisample_samples(MSAA);
+    let winit_mainloop = EventLoop::new().unwrap();
+    let (window, display) = glutin::SimpleWindowBuilder::new()
+        .with_config_template_builder(ConfigTemplateBuilder::new()
+            .with_multisampling(MSAA))
+        .with_inner_size(WIDTH, HEIGHT)
+        .build(&winit_mainloop);
 
-    let window = Rc::new(RefCell::new(
-        sdl_video
-            .window(&make_window_title(gain), WIDTH, HEIGHT)
-            .position_centered()
-            .resizable()
-            .opengl()
-            .build()
-            .unwrap(),
-    ));
+    let mut plot = [Coords { coords: [0.0, 0.0] }; BANDWIDTH_PLUS_ONE];
+    plot[0].coords = [MARGIN_VW - 1.0, 0.0];
 
-    let backend = sdl_backend::SDLBackend::new(window.clone()).unwrap();
-    let display = sdl_backend::Display::new(backend).unwrap();
+    // Generate X-coordinates beforehand.
+    const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / BANDWIDTH as f32;
+    let mut x = X_STEP + MARGIN_VW - 1.0;
 
-    const VERTEX_SHADER_SRC: &str = r"#version 330 core
-    in vec2 coords;
-
-    void main() {
-        gl_Position = vec4(coords.x, coords.y, 0.0f, 1.0f);
-    }";
-
-    const FRAGMENT_SHADER_SRC: &str = r"#version 330 core
-    out vec4 FragColor;
-
-    void main() {
-        FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    }";
+    for vertex in plot[1..].iter_mut() {
+        vertex.coords[0] = x;
+        x += X_STEP;
+    }
 
     let plot_buffer = VertexBuffer::dynamic(&display, &plot).unwrap();
     let indices = NoIndices(PrimitiveType::LineStrip);
@@ -266,93 +373,31 @@ fn main() {
         ..Default::default()
     };
 
-    plot[0].coords = [MARGIN_VW - 1.0, 0.0];
+    let mut planner = RealFftPlanner::new();
+    let fft = planner.plan_fft_forward(WINDOW_SIZE as usize);
+    let frequency_bins = [Complex32::default(); FFT_SIZE];
+    let fft_scratch= fft.make_scratch_vec();
 
-    /* Preemptively generate X coordinates once, then reused by GPU infinite times. */
-    const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / BANDWIDTH as f32;
-    let mut x = X_STEP + MARGIN_VW - 1.0;
+    let mut app = App {
+        window,
+        display,
+        pw_mainloop,
+        audio_rec,
+        fft,
+        plot,
+        plot_buffer,
+        indices,
+        program,
+        draw_params,
+        gain: GAIN,
+        gain_multiplier: db_rms_to_factor(GAIN),
+        frequency_bins,
+        fft_scratch,
+        smoothed_fft: [0.0; BANDWIDTH],
+        windowed_signal: [0.0; WINDOW_SIZE]
+    };
 
-    for vertex in plot[1..].iter_mut() {
-        vertex.coords[0] = x;
-        x += X_STEP;
-    }
+    app.update_window_title();
 
-    'running: loop {
-        /* Event Loop Begin */
-        for event in sdl_events.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(Keycode::J),
-                    ..
-                } => {
-                    gain += 0.1;
-
-                    gain_mult = db_rms_to_factor(gain);
-
-                    window
-                        .borrow_mut()
-                        .set_title(&make_window_title(gain))
-                        .unwrap();
-                }
-                Event::KeyDown {
-                    keycode: Some(Keycode::K),
-                    ..
-                } => {
-                    gain -= 0.1;
-
-                    gain_mult = db_rms_to_factor(gain);
-
-                    window
-                        .borrow_mut()
-                        .set_title(&make_window_title(gain))
-                        .unwrap();
-                }
-                _ => {}
-            }
-        }
-
-        // NOTE Without a timeout, the PipeWire event-loop may continue indefinitely.
-        pw_mainloop.loop_().iterate(Duration::from_secs(0));
-
-        /* Event Loop End */
-        let audio_recorder = audio_recorder.borrow();
-        for (i, s) in audio_recorder.window.iter().enumerate() {
-            windowed_signal[i] = window_fn[i] * (*s);
-        }
-        drop(audio_recorder);
-
-        fft.process_with_scratch(&mut windowed_signal, &mut frequency_bins, &mut fft_scratch)
-            .unwrap();
-
-        let mut frame = display.draw();
-        frame.clear_color(1.0, 1.0, 0.0, 1.0);
-
-        let mut sign = 1.0;
-        for (i, bin) in frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
-            let y = SMOOTHING_TIME_CONST * smoothed_fft[i]
-                + (1.0 - SMOOTHING_TIME_CONST) * gain_mult * bin.abs() * NORMALIZATION;
-
-            smoothed_fft[i] = y;
-            plot[i + 1].coords[1] = sign * y;
-
-            sign *= -1.0;
-        }
-
-        plot_buffer.write(&plot);
-        frame
-            .draw(
-                &plot_buffer,
-                &indices,
-                &program,
-                &EmptyUniforms,
-                &draw_params,
-            )
-            .unwrap();
-        frame.finish().unwrap();
-    }
+    winit_mainloop.run_app(&mut app).unwrap();
 }
