@@ -46,6 +46,8 @@ const MSAA: u8 = 8; // 8x MSAA.
 
 const SAMPLERATE: u32 = 48000;
 const WINDOW_SIZE: usize = 2048;
+const WINDOW_SIZE_HALF: usize = WINDOW_SIZE / 2;
+const WINDOW_SIZE_PLUS_ONE: usize = WINDOW_SIZE + 1;
 const FFT_SIZE: usize = WINDOW_SIZE / 2 + 1;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
@@ -59,7 +61,11 @@ const HIGH_BIN: usize = (BIN_WIDTH * MAX_FREQ as f32) as usize;
 const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
 const BANDWIDTH_PLUS_ONE: usize = BANDWIDTH + 1;
 
+mod sliding_window;
+use sliding_window::SlidingWindow;
+
 lazy_static! {
+    // Hann window function.
     static ref WINDOW_FN: [f32; WINDOW_SIZE] = (|| {
         let mut win = [0.0; WINDOW_SIZE];
 
@@ -74,31 +80,15 @@ lazy_static! {
     })();
 }
 
-/// A circular buffer, but for a specific purpose.
-struct SlidingWindow<T, const N: usize> {
-    buffer: [T; N],
-    write_pos: usize,
-}
-
-impl<T, const N: usize> SlidingWindow<T, N> {
-    fn put(&mut self, elem: T) {
-        self.buffer[self.write_pos] = elem;
-        self.write_pos = (self.write_pos + 1) % self.buffer.len();
-    }
-}
-
 struct AudioRecorder {
-    window: SlidingWindow<f32, WINDOW_SIZE>,
+    window: SlidingWindow<f32, WINDOW_SIZE_PLUS_ONE>,
     channels: usize,
 }
 
 impl AudioRecorder {
     fn new() -> Self {
         Self {
-            window: SlidingWindow {
-                buffer: [0.0; WINDOW_SIZE],
-                write_pos: 0,
-            },
+            window: SlidingWindow::new([0.0; WINDOW_SIZE_PLUS_ONE], WINDOW_SIZE_HALF),
             channels: 0,
         }
     }
@@ -243,7 +233,7 @@ impl<'a> ApplicationHandler for App<'a> {
             }
             WindowEvent::RedrawRequested => {
                 let audio_recorder = self.audio_rec.borrow();
-                for (i, s) in audio_recorder.window.buffer.iter().enumerate() {
+                for (i, s) in audio_recorder.window.iter().enumerate() {
                     self.windowed_signal[i] = WINDOW_FN[i] * (*s);
                 }
                 drop(audio_recorder);
