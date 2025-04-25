@@ -13,4 +13,12 @@ keywords = ["audio", "fft", "sdl3", "visualizer"]
 realfft = "3.4.0"
 sdl3 = { version = "0", features = [] }
 circular-buffer = "0.1.9"
-glium = { version = "*", features = [], default-features = false }
+
+[dependencies.glium]
+version = "*"
+features = []
+default-features = false
+
+[dependencies.pipewire]
+git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs"
+
