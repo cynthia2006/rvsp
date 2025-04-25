@@ -287,12 +287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "circular-buffer"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67261db007b5f4cf8cba393c1a5c511a5cc072339ce16e12aeba1d7b9b77946"
-
-[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1468,7 +1462,6 @@ checksum = "eded382c5f5f786b989652c49544c4877d9f015cc22e145a5ea8ea66c2921cd2"
 name = "rvsp"
 version = "0.1.6"
 dependencies = [
- "circular-buffer",
  "glium",
  "lazy_static",
  "pipewire",

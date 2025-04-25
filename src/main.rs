@@ -6,21 +6,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use circular_buffer::CircularBuffer;
-
 use glium::backend::glutin;
 use glium::backend::glutin::Display;
 use glium::glutin::config::ConfigTemplateBuilder;
 use glium::glutin::surface::WindowSurface;
+use glium::implement_vertex;
+use glium::index::{NoIndices, PrimitiveType};
+use glium::uniforms::EmptyUniforms;
 use glium::winit::application::ApplicationHandler;
 use glium::winit::dpi::PhysicalSize;
 use glium::winit::event::{KeyEvent, WindowEvent};
 use glium::winit::event_loop::{ActiveEventLoop, EventLoop};
 use glium::winit::keyboard::{KeyCode, PhysicalKey};
 use glium::winit::window::{Window, WindowId};
-use glium::implement_vertex;
-use glium::index::{NoIndices, PrimitiveType};
-use glium::uniforms::EmptyUniforms;
 use glium::{DrawParameters, Program, Surface, VertexBuffer};
 
 use lazy_static::lazy_static;
@@ -31,8 +29,8 @@ use pipewire::main_loop::MainLoop;
 use pipewire::properties::properties;
 use pipewire::spa::param::audio::{AudioFormat, AudioInfoRaw};
 use pipewire::spa::param::ParamType;
-use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod;
+use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod::Pod;
 use pipewire::spa::utils::{Direction, SpaTypes};
 use pipewire::stream::{Stream, StreamFlags, StreamRef};
@@ -48,11 +46,10 @@ const MSAA: u8 = 8; // 8x MSAA.
 
 const SAMPLERATE: u32 = 48000;
 const WINDOW_SIZE: usize = 2048;
-const WINDOW_SIZE_DIV_2: usize = WINDOW_SIZE / 2;
 const FFT_SIZE: usize = WINDOW_SIZE / 2 + 1;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
-const GAIN: f32 = 23.0;
+const GAIN: f32 = 26.0;
 const NORMALIZATION: f32 = 1.0 / WINDOW_SIZE as f32;
 const SMOOTHING_TIME_CONST: f32 = 0.6;
 
@@ -65,30 +62,44 @@ const BANDWIDTH_PLUS_ONE: usize = BANDWIDTH + 1;
 lazy_static! {
     static ref WINDOW_FN: [f32; WINDOW_SIZE] = (|| {
         let mut win = [0.0; WINDOW_SIZE];
-        
+
         const A0: f32 = 0.5;
         for (i, w) in win.iter_mut().enumerate() {
             let x: f32 = (2.0 * PI * i as f32 / WINDOW_SIZE as f32).cos();
-    
+
             *w = A0 - (1.0 - A0) * x;
         }
-    
+
         win
-    }) ();
+    })();
+}
+
+/// A circular buffer, but for a specific purpose.
+struct SlidingWindow<T, const N: usize> {
+    buffer: [T; N],
+    write_pos: usize,
+}
+
+impl<T, const N: usize> SlidingWindow<T, N> {
+    fn put(&mut self, elem: T) {
+        self.buffer[self.write_pos] = elem;
+        self.write_pos = (self.write_pos + 1) % self.buffer.len();
+    }
 }
 
 struct AudioRecorder {
-    window: CircularBuffer<WINDOW_SIZE, f32>,
+    window: SlidingWindow<f32, WINDOW_SIZE>,
     channels: usize,
-    buffer: [f32; WINDOW_SIZE_DIV_2],
 }
 
 impl AudioRecorder {
     fn new() -> Self {
         Self {
-            window: CircularBuffer::new(),
+            window: SlidingWindow {
+                buffer: [0.0; WINDOW_SIZE],
+                write_pos: 0,
+            },
             channels: 0,
-            buffer: [0.0; WINDOW_SIZE_DIV_2],
         }
     }
 
@@ -101,23 +112,24 @@ impl AudioRecorder {
 
         let data = &mut datas[0];
         let n_chans = self.channels;
+        let n_samples = data.chunk().size() as usize / mem::size_of::<f32>() / n_chans;
 
         if let Some(samples) = data.data() {
-            for (i, s) in self.buffer.iter_mut().enumerate() {
-                *s = 0.0;
+            for i in 0..n_samples {
+                let mut s = 0.0;
 
                 // Downmixing multi-channel audio; PipeWire would not do it for us.
                 for c in 0..n_chans {
                     let start = (n_chans * i + c) * mem::size_of::<f32>();
                     let end = start + mem::size_of::<f32>();
 
-                    *s += f32::from_le_bytes(samples[start..end].try_into().unwrap());
+                    s += f32::from_le_bytes(samples[start..end].try_into().unwrap());
                 }
 
-                *s /= n_chans as f32;
-            }
+                s /= n_chans as f32;
 
-            self.window.extend_from_slice(&self.buffer);
+                self.window.put(s);
+            }
         }
     }
 }
@@ -153,7 +165,7 @@ struct App<'a> {
     pw_mainloop: MainLoop,
     audio_rec: Rc<RefCell<AudioRecorder>>,
     fft: Arc<dyn RealToComplex<f32>>,
-    
+
     plot: [Coords; BANDWIDTH_PLUS_ONE],
     plot_buffer: VertexBuffer<Coords>,
     indices: NoIndices,
@@ -204,33 +216,44 @@ impl<'a> ApplicationHandler for App<'a> {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { 
-                event: KeyEvent { 
-                    physical_key: PhysicalKey::Code(KeyCode::KeyJ), 
-                .. }, 
-            .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::KeyJ),
+                        ..
+                    },
+                ..
+            } => {
                 self.increase_gain(0.1);
                 self.update_window_title();
-            },
-            WindowEvent::KeyboardInput { 
-                event: KeyEvent { 
-                    physical_key: PhysicalKey::Code(KeyCode::KeyK), 
-                .. }, 
-            .. } => {
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::KeyK),
+                        ..
+                    },
+                ..
+            } => {
                 self.decrease_gain(0.1);
                 self.update_window_title();
-            },
+            }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
                 self.display.resize((width, height));
-            },
+            }
             WindowEvent::RedrawRequested => {
                 let audio_recorder = self.audio_rec.borrow();
-                for (i, s) in audio_recorder.window.iter().enumerate() {
+                for (i, s) in audio_recorder.window.buffer.iter().enumerate() {
                     self.windowed_signal[i] = WINDOW_FN[i] * (*s);
                 }
                 drop(audio_recorder);
 
-                self.fft.process_with_scratch(&mut self.windowed_signal, &mut self.frequency_bins, &mut self.fft_scratch)
+                self.fft
+                    .process_with_scratch(
+                        &mut self.windowed_signal,
+                        &mut self.frequency_bins,
+                        &mut self.fft_scratch,
+                    )
                     .unwrap();
 
                 let mut frame = self.display.draw();
@@ -239,11 +262,14 @@ impl<'a> ApplicationHandler for App<'a> {
                 let mut sign = 1.0;
                 for (i, bin) in self.frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
                     let y = SMOOTHING_TIME_CONST * self.smoothed_fft[i]
-                        + (1.0 - SMOOTHING_TIME_CONST) * self.gain_multiplier * bin.abs() * NORMALIZATION;
-        
+                        + (1.0 - SMOOTHING_TIME_CONST)
+                            * self.gain_multiplier
+                            * bin.abs()
+                            * NORMALIZATION;
+
                     self.smoothed_fft[i] = y;
                     self.plot[i + 1].coords[1] = sign * y;
-        
+
                     sign *= -1.0;
                 }
 
@@ -339,16 +365,14 @@ fn main() {
         .connect(
             Direction::Input,
             None,
-            StreamFlags::AUTOCONNECT 
-            | StreamFlags::MAP_BUFFERS,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut stream_params,
         )
         .unwrap();
 
     let winit_mainloop = EventLoop::new().unwrap();
     let (window, display) = glutin::SimpleWindowBuilder::new()
-        .with_config_template_builder(ConfigTemplateBuilder::new()
-            .with_multisampling(MSAA))
+        .with_config_template_builder(ConfigTemplateBuilder::new().with_multisampling(MSAA))
         .with_inner_size(WIDTH, HEIGHT)
         .build(&winit_mainloop);
 
@@ -376,7 +400,7 @@ fn main() {
     let mut planner = RealFftPlanner::new();
     let fft = planner.plan_fft_forward(WINDOW_SIZE as usize);
     let frequency_bins = [Complex32::default(); FFT_SIZE];
-    let fft_scratch= fft.make_scratch_vec();
+    let fft_scratch = fft.make_scratch_vec();
 
     let mut app = App {
         window,
@@ -394,7 +418,7 @@ fn main() {
         frequency_bins,
         fft_scratch,
         smoothed_fft: [0.0; BANDWIDTH],
-        windowed_signal: [0.0; WINDOW_SIZE]
+        windowed_signal: [0.0; WINDOW_SIZE],
     };
 
     app.update_window_title();
