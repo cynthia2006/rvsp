@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::f32::consts::{PI, SQRT_2};
 use std::io::Cursor;
-use std::mem;
+use std::mem::size_of;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +47,6 @@ const MSAA: u8 = 8; // 8x MSAA.
 const SAMPLERATE: u32 = 48000;
 const WINDOW_SIZE: usize = 2048;
 const WINDOW_SIZE_HALF: usize = WINDOW_SIZE / 2;
-const WINDOW_SIZE_PLUS_ONE: usize = WINDOW_SIZE + 1;
 const FFT_SIZE: usize = WINDOW_SIZE / 2 + 1;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
@@ -81,14 +80,14 @@ lazy_static! {
 }
 
 struct AudioRecorder {
-    window: SlidingWindow<f32, WINDOW_SIZE_PLUS_ONE>,
+    window: SlidingWindow<f32, WINDOW_SIZE>,
     channels: usize,
 }
 
 impl AudioRecorder {
     fn new() -> Self {
         Self {
-            window: SlidingWindow::new([0.0; WINDOW_SIZE_PLUS_ONE], WINDOW_SIZE_HALF),
+            window: SlidingWindow::new([0.0; WINDOW_SIZE], 0),
             channels: 0,
         }
     }
@@ -102,7 +101,7 @@ impl AudioRecorder {
 
         let data = &mut datas[0];
         let n_chans = self.channels;
-        let n_samples = data.chunk().size() as usize / mem::size_of::<f32>() / n_chans;
+        let n_samples = data.chunk().size() as usize / size_of::<f32>() / n_chans;
 
         if let Some(samples) = data.data() {
             for i in 0..n_samples {
@@ -110,8 +109,8 @@ impl AudioRecorder {
 
                 // Downmixing multi-channel audio; PipeWire would not do it for us.
                 for c in 0..n_chans {
-                    let start = (n_chans * i + c) * mem::size_of::<f32>();
-                    let end = start + mem::size_of::<f32>();
+                    let start = (n_chans * i + c) * size_of::<f32>();
+                    let end = start + size_of::<f32>();
 
                     s += f32::from_le_bytes(samples[start..end].try_into().unwrap());
                 }
@@ -150,9 +149,11 @@ void main() {
 }";
 
 struct App<'a> {
+    pw_loop: &'a MainLoop,
+    stream: &'a Stream,
+
     window: Window,
     display: Display<WindowSurface>,
-    pw_mainloop: MainLoop,
     audio_rec: Rc<RefCell<AudioRecorder>>,
     fft: Arc<dyn RealToComplex<f32>>,
 
@@ -194,8 +195,20 @@ impl<'a> App<'a> {
 }
 
 impl<'a> ApplicationHandler for App<'a> {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // TODO
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.stream.set_active(true).unwrap();
+
+        // Trigger PipeWire event-loop iteration.
+        self.user_event(event_loop, ());
+    }
+
+    // This might be redundant.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.stream.set_active(false).unwrap();
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.pw_loop.loop_().iterate(Duration::from_millis(0));
     }
 
     fn window_event(
@@ -281,10 +294,6 @@ impl<'a> ApplicationHandler for App<'a> {
             _ => {}
         }
     }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        self.pw_mainloop.loop_().iterate(Duration::from_millis(0));
-    }
 }
 
 fn main() {
@@ -306,7 +315,7 @@ fn main() {
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Monitor",
             *pw::keys::MEDIA_ROLE => "Music",
-            *pw::keys::NODE_LATENCY => "1024/48000",
+            *pw::keys::NODE_LATENCY => format!("{}/{}", WINDOW_SIZE_HALF, SAMPLERATE),
             // Monitor system audio; the default sink.
             *pw::keys::STREAM_CAPTURE_SINK => "true",
         },
@@ -339,7 +348,7 @@ fn main() {
                 let mut info = AudioInfoRaw::new();
 
                 info.set_format(AudioFormat::F32LE);
-                info.set_rate(48000);
+                info.set_rate(SAMPLERATE);
 
                 info.into()
             },
@@ -350,12 +359,11 @@ fn main() {
     .into_inner();
 
     let mut stream_params = [Pod::from_bytes(&raw_stream_params).unwrap()];
-
     stream
         .connect(
             Direction::Input,
             None,
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::INACTIVE,
             &mut stream_params,
         )
         .unwrap();
@@ -393,9 +401,10 @@ fn main() {
     let fft_scratch = fft.make_scratch_vec();
 
     let mut app = App {
+        pw_loop: &pw_mainloop,
+        stream: &stream,
         window,
         display,
-        pw_mainloop,
         audio_rec,
         fft,
         plot,
