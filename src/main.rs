@@ -15,7 +15,7 @@ use glium::index::{NoIndices, PrimitiveType};
 use glium::uniforms::EmptyUniforms;
 use glium::winit::application::ApplicationHandler;
 use glium::winit::dpi::PhysicalSize;
-use glium::winit::event::{KeyEvent, WindowEvent};
+use glium::winit::event::{ElementState, KeyEvent, WindowEvent};
 use glium::winit::event_loop::{ActiveEventLoop, EventLoop};
 use glium::winit::keyboard::{KeyCode, PhysicalKey};
 use glium::winit::window::{Window, WindowId};
@@ -195,11 +195,8 @@ impl<'a> App<'a> {
 }
 
 impl<'a> ApplicationHandler for App<'a> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         self.stream.set_active(true).unwrap();
-
-        // Trigger PipeWire event-loop iteration.
-        self.user_event(event_loop, ());
     }
 
     // This might be redundant.
@@ -223,6 +220,7 @@ impl<'a> ApplicationHandler for App<'a> {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(KeyCode::KeyJ),
+                        state: ElementState::Pressed,
                         ..
                     },
                 ..
@@ -234,6 +232,7 @@ impl<'a> ApplicationHandler for App<'a> {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(KeyCode::KeyK),
+                        state: ElementState::Pressed,
                         ..
                     },
                 ..
