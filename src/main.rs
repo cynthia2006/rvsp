@@ -18,6 +18,7 @@ use glium::winit::dpi::PhysicalSize;
 use glium::winit::event::{ElementState, KeyEvent, WindowEvent};
 use glium::winit::event_loop::{ActiveEventLoop, EventLoop};
 use glium::winit::keyboard::{KeyCode, PhysicalKey};
+use glium::winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use glium::winit::window::{Window, WindowId};
 use glium::{DrawParameters, Program, Surface, VertexBuffer};
 
@@ -32,6 +33,7 @@ use pipewire::spa::param::ParamType;
 use pipewire::spa::pod;
 use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod::Pod;
+use pipewire::spa::support::system::IoFlags;
 use pipewire::spa::utils::{Direction, SpaTypes};
 use pipewire::stream::{Stream, StreamFlags, StreamRef};
 
@@ -149,8 +151,7 @@ void main() {
 }";
 
 struct App<'a> {
-    pw_loop: &'a MainLoop,
-    stream: &'a Stream,
+    stream: Box<Stream>,
 
     window: Window,
     display: Display<WindowSurface>,
@@ -202,10 +203,6 @@ impl<'a> ApplicationHandler for App<'a> {
     // This might be redundant.
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.stream.set_active(false).unwrap();
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        self.pw_loop.loop_().iterate(Duration::from_millis(0));
     }
 
     fn window_event(
@@ -299,7 +296,6 @@ fn main() {
     pw::init();
 
     let audio_rec = Rc::new(RefCell::new(AudioRecorder::new()));
-    let audio_rec_clone = audio_rec.clone();
 
     let pw_mainloop = MainLoop::new(None).unwrap();
     let pw_context = Context::new(&pw_mainloop).unwrap();
@@ -307,32 +303,39 @@ fn main() {
         .connect(None)
         .expect("Could not connect to PipeWire context");
 
-    let stream = Stream::new(
-        &pw_core,
-        &format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Monitor",
-            *pw::keys::MEDIA_ROLE => "Music",
-            *pw::keys::NODE_LATENCY => format!("{}/{}", WINDOW_SIZE_HALF, SAMPLERATE),
-            // Monitor system audio; the default sink.
-            *pw::keys::STREAM_CAPTURE_SINK => "true",
-        },
-    )
-    .unwrap();
+    let stream = Box::new(
+        Stream::new(
+            &pw_core,
+            &format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Monitor",
+                *pw::keys::MEDIA_ROLE => "Music",
+                *pw::keys::NODE_LATENCY => format!("{}/{}", WINDOW_SIZE_HALF, SAMPLERATE),
+                // Monitor system audio; the default sink.
+                *pw::keys::STREAM_CAPTURE_SINK => "true",
+            },
+        )
+        .unwrap(),
+    );
 
     // TODO Handle other events on the stream as well, if required.
     let _listener = stream
-        .add_local_listener_with_user_data(audio_rec_clone)
+        .add_local_listener_with_user_data(audio_rec.clone())
         .param_changed(|_, user_data, id, param| {
             if id != ParamType::Format.as_raw() {
                 return;
             }
 
-            let mut format = AudioInfoRaw::new();
-            format.parse(&param.unwrap()).unwrap();
+            let mut channels = 0;
+            if let Some(param) = param {
+                let mut format = AudioInfoRaw::new();
+                format.parse(param).unwrap();
 
-            user_data.borrow_mut().channels = format.channels() as usize;
+                channels = format.channels() as usize;
+            }
+
+            user_data.borrow_mut().channels = channels;
         })
         .process(|stream, user_data| user_data.borrow_mut().callback(&stream))
         .register()
@@ -399,9 +402,8 @@ fn main() {
     let frequency_bins = [Complex32::default(); FFT_SIZE];
     let fft_scratch = fft.make_scratch_vec();
 
-    let mut app = App {
-        pw_loop: &pw_mainloop,
-        stream: &stream,
+    let app = App {
+        stream,
         window,
         display,
         audio_rec,
@@ -421,5 +423,18 @@ fn main() {
 
     app.update_window_title();
 
-    winit_mainloop.run_app(&mut app).unwrap();
+    let app = RefCell::new(app);
+    let pw_mainloop_rc = Rc::new(pw_mainloop);
+    let pw_mainloop_clone = Rc::clone(&pw_mainloop_rc);
+
+    let _winit_source =
+        pw_mainloop_rc
+            .loop_()
+            .add_io(winit_mainloop, IoFlags::IN | IoFlags::ERR, move |loop_| {
+                if let PumpStatus::Exit(_) = loop_.pump_app_events(Some(Duration::ZERO), &mut *app.borrow_mut()) {
+                    pw_mainloop_clone.quit();
+                }
+            });
+
+    pw_mainloop_rc.run();
 }
