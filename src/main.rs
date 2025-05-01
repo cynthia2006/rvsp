@@ -359,9 +359,9 @@ fn main() {
 
     let context_attribs = ContextAttributesBuilder::new()
         .build(window.window_handle().ok().map(|wh| wh.as_raw()));
-    let display = gl_config.display();
+    let gl_display = gl_config.display();
     let gl_context = unsafe { 
-        display.create_context(&gl_config, &context_attribs)
+        gl_display.create_context(&gl_config, &context_attribs)
             .unwrap()
             .treat_as_possibly_current() 
     };
@@ -378,7 +378,7 @@ fn main() {
     gl_context.make_current(&gl_surface).unwrap();
     gl_surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap())).unwrap();
 
-    gl::load_with(|proc| display.get_proc_address(CString::new(proc).unwrap().as_c_str()));
+    gl::load_with(|proc| gl_display.get_proc_address(CString::new(proc).unwrap().as_c_str()));
 
     let mut plot = [0.0; 2*BANDWIDTH_PLUS_ONE];
     plot[0] = MARGIN_VW - 1.0;
