@@ -57,7 +57,7 @@ const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
 const GAIN: f32 = 26.0;
 const NORMALIZATION: f32 = 1.0 / WINDOW_SIZE as f32;
-const SMOOTHING_TIME_CONST: f32 = 0.6;
+const SMOOTHING_FACTOR: f32 = 0.6;
 
 const BIN_WIDTH: f32 = WINDOW_SIZE as f32 / SAMPLERATE as f32;
 const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
@@ -150,6 +150,7 @@ struct App {
 
     gain: f32,
     gain_multiplier: f32,
+    smoothing_factor: f32,
     frequency_bins: [Complex32; FFT_SIZE],
     fft_scratch: Vec<Complex32>,
     smoothed_fft: [f32; BANDWIDTH],
@@ -167,12 +168,23 @@ impl App {
         self.gain_multiplier = db_rms_to_factor(self.gain);
     }
 
+    fn increase_smoothing(&mut self, increment: f32) {
+        self.smoothing_factor += increment;
+        self.smoothing_factor = self.smoothing_factor.clamp(0.0, 1.0);
+    }
+
+    fn decrease_smoothing(&mut self, decrement: f32) {
+        self.smoothing_factor -= decrement;
+        self.smoothing_factor = self.smoothing_factor.clamp(0.0, 1.0);
+    }
+
     fn update_window_title(&self) {
         let title = format!(
-            "{} v{} ({:.2}dB)",
+            "{} v{} (🔊 {:.2}dB , τ = {:.2})",
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
-            self.gain
+            self.gain,
+            self.smoothing_factor
         );
 
         self.window.set_title(&title);
@@ -195,7 +207,7 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::KeyJ),
+                        physical_key: PhysicalKey::Code(KeyCode::ArrowUp),
                         state: ElementState::Pressed,
                         ..
                     },
@@ -207,7 +219,7 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::KeyK),
+                        physical_key: PhysicalKey::Code(KeyCode::ArrowDown),
                         state: ElementState::Pressed,
                         ..
                     },
@@ -215,7 +227,30 @@ impl ApplicationHandler for App {
             } => {
                 self.decrease_gain(0.1);
                 self.update_window_title();
-            }
+            },
+            WindowEvent::KeyboardInput { 
+                event: KeyEvent { 
+                    physical_key: PhysicalKey::Code(KeyCode::ArrowLeft),
+                    state: ElementState::Pressed,
+                    ..
+                },
+                ..
+            } => {
+                self.decrease_smoothing(0.01);
+                self.update_window_title();
+            },
+            WindowEvent::KeyboardInput { 
+                event: KeyEvent { 
+                    physical_key: PhysicalKey::Code(KeyCode::ArrowRight),
+                    state: ElementState::Pressed,
+                    ..
+                },
+                ..
+            } => {
+                self.increase_smoothing(0.01);
+                self.update_window_title();
+            },
+
             WindowEvent::Resized(PhysicalSize { width, height }) => {
                 self.gl_surface.resize(
                     &self.gl_context, 
@@ -241,8 +276,8 @@ impl ApplicationHandler for App {
 
                 let mut sign = 1.0;
                 for (i, bin) in self.frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
-                    let y = SMOOTHING_TIME_CONST * self.smoothed_fft[i]
-                        + (1.0 - SMOOTHING_TIME_CONST)
+                    let y = self.smoothing_factor * self.smoothed_fft[i]
+                        + (1.0 - self.smoothing_factor)
                             * self.gain_multiplier
                             * bin.abs()
                             * NORMALIZATION;
@@ -411,6 +446,7 @@ fn main() {
         renderer,
         gain: GAIN,
         gain_multiplier: db_rms_to_factor(GAIN),
+        smoothing_factor: SMOOTHING_FACTOR,
         frequency_bins,
         fft_scratch,
         smoothed_fft: [0.0; BANDWIDTH],
