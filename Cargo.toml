@@ -12,7 +12,10 @@ keywords = ["audio", "fft", "visualizer"]
 [dependencies]
 realfft = "3.4.0"
 lazy_static = "1.5.0"
-glium = "*"
+winit = "0.30.10"
+glutin = "0.32.3"
+glutin-winit = "0.5.0"
+gl = "0.14.0"
 
 [dependencies.pipewire]
 git = "https://gitlab.freedesktop.org/pipewire/pipewire-rs"

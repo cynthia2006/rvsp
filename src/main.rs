@@ -1,26 +1,29 @@
 use std::cell::RefCell;
 use std::f32::consts::{PI, SQRT_2};
+use std::ffi::CString;
 use std::io::Cursor;
 use std::mem::size_of;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use glium::backend::glutin;
-use glium::backend::glutin::Display;
-use glium::glutin::config::ConfigTemplateBuilder;
-use glium::glutin::surface::WindowSurface;
-use glium::implement_vertex;
-use glium::index::{NoIndices, PrimitiveType};
-use glium::uniforms::EmptyUniforms;
-use glium::winit::application::ApplicationHandler;
-use glium::winit::dpi::PhysicalSize;
-use glium::winit::event::{ElementState, KeyEvent, WindowEvent};
-use glium::winit::event_loop::{ActiveEventLoop, EventLoop};
-use glium::winit::keyboard::{KeyCode, PhysicalKey};
-use glium::winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
-use glium::winit::window::{Window, WindowId};
-use glium::{DrawParameters, Program, Surface, VertexBuffer};
+use glutin::config::ConfigTemplateBuilder;
+use glutin::context::{ContextAttributesBuilder, PossiblyCurrentContext};
+use glutin::display::GetGlDisplay;
+use glutin::prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext};
+use glutin::surface::{GlSurface, Surface, SwapInterval, WindowSurface};
+
+use glutin_winit::GlWindow;
+
+use winit::application::ApplicationHandler;
+use winit::dpi::{self, PhysicalSize};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
+use winit::raw_window_handle::HasWindowHandle;
+use winit::window::{Window, WindowId};
 
 use lazy_static::lazy_static;
 
@@ -63,6 +66,9 @@ const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
 const BANDWIDTH_PLUS_ONE: usize = BANDWIDTH + 1;
 
 mod sliding_window;
+mod polygon_renderer;
+
+use polygon_renderer::PolygonRenderer;
 use sliding_window::SlidingWindow;
 
 lazy_static! {
@@ -130,39 +136,17 @@ fn db_rms_to_factor(rms: f32) -> f32 {
     SQRT_2 * 10.0.powf(rms / 20.0)
 }
 
-#[derive(Copy, Clone)]
-struct Coords {
-    coords: [f32; 2],
-}
-implement_vertex!(Coords, coords);
-
-const VERTEX_SHADER_SRC: &str = r"#version 330 core
-in vec2 coords;
-
-void main() {
-    gl_Position = vec4(coords.xy, 0.0f, 1.0f);
-}";
-
-const FRAGMENT_SHADER_SRC: &str = r"#version 330 core
-out vec4 FragColor;
-
-void main() {
-    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-}";
-
-struct App<'a> {
+struct App {
     stream: Box<Stream>,
 
     window: Window,
-    display: Display<WindowSurface>,
+    gl_context: PossiblyCurrentContext,
+    gl_surface: Surface<WindowSurface>,
     audio_rec: Rc<RefCell<AudioRecorder>>,
     fft: Arc<dyn RealToComplex<f32>>,
 
-    plot: [Coords; BANDWIDTH_PLUS_ONE],
-    plot_buffer: VertexBuffer<Coords>,
-    indices: NoIndices,
-    program: Program,
-    draw_params: DrawParameters<'a>,
+    plot: [f32; 2*BANDWIDTH_PLUS_ONE],
+    renderer: PolygonRenderer,
 
     gain: f32,
     gain_multiplier: f32,
@@ -172,7 +156,7 @@ struct App<'a> {
     windowed_signal: [f32; WINDOW_SIZE],
 }
 
-impl<'a> App<'a> {
+impl App {
     fn increase_gain(&mut self, increment: f32) {
         self.gain += increment;
         self.gain_multiplier = db_rms_to_factor(self.gain);
@@ -195,14 +179,9 @@ impl<'a> App<'a> {
     }
 }
 
-impl<'a> ApplicationHandler for App<'a> {
+impl ApplicationHandler for App {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         self.stream.set_active(true).unwrap();
-    }
-
-    // This might be redundant.
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        self.stream.set_active(false).unwrap();
     }
 
     fn window_event(
@@ -238,8 +217,11 @@ impl<'a> ApplicationHandler for App<'a> {
                 self.update_window_title();
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
-                self.display.resize((width, height));
-            }
+                self.gl_surface.resize(
+                    &self.gl_context, 
+                    NonZeroU32::new(width).unwrap(),
+                    NonZeroU32::new(height).unwrap());
+            },
             WindowEvent::RedrawRequested => {
                 let audio_recorder = self.audio_rec.borrow();
                 for (i, s) in audio_recorder.window.iter().enumerate() {
@@ -255,8 +237,7 @@ impl<'a> ApplicationHandler for App<'a> {
                     )
                     .unwrap();
 
-                let mut frame = self.display.draw();
-                frame.clear_color(1.0, 1.0, 0.0, 1.0);
+                unsafe { self.renderer.clear((1.0, 1.0, 0.0)); }
 
                 let mut sign = 1.0;
                 for (i, bin) in self.frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
@@ -267,24 +248,15 @@ impl<'a> ApplicationHandler for App<'a> {
                             * NORMALIZATION;
 
                     self.smoothed_fft[i] = y;
-                    self.plot[i + 1].coords[1] = sign * y;
+                    self.plot[2*(i + 1) + 1] = sign * y;
 
                     sign *= -1.0;
                 }
 
-                self.plot_buffer.write(&self.plot);
-                frame
-                    .draw(
-                        &self.plot_buffer,
-                        &self.indices,
-                        &self.program,
-                        &EmptyUniforms,
-                        &self.draw_params,
-                    )
-                    .unwrap();
+                unsafe { self.renderer.upload(&self.plot); }
 
                 self.window.pre_present_notify();
-                frame.finish().unwrap();
+                self.gl_surface.swap_buffers(&self.gl_context).unwrap();
                 self.window.request_redraw();
             }
             _ => {}
@@ -327,7 +299,9 @@ fn main() {
                 return;
             }
 
+            // Channels would be zero, when the format is cleared.
             let mut channels = 0;
+
             if let Some(param) = param {
                 let mut format = AudioInfoRaw::new();
                 format.parse(param).unwrap();
@@ -371,31 +345,55 @@ fn main() {
         .unwrap();
 
     let winit_mainloop = EventLoop::new().unwrap();
-    let (window, display) = glutin::SimpleWindowBuilder::new()
-        .with_config_template_builder(ConfigTemplateBuilder::new().with_multisampling(MSAA))
-        .with_inner_size(WIDTH, HEIGHT)
-        .build(&winit_mainloop);
+    let window_attribs = Window::default_attributes()
+        .with_inner_size(dpi::PhysicalSize { width: WIDTH, height: HEIGHT });
+    let gl_config_template_builder = ConfigTemplateBuilder::new()
+        .with_multisampling(MSAA);
 
-    let mut plot = [Coords { coords: [0.0, 0.0] }; BANDWIDTH_PLUS_ONE];
-    plot[0].coords = [MARGIN_VW - 1.0, 0.0];
+    let (window, gl_config) = glutin_winit::DisplayBuilder::new()
+        .with_window_attributes(Some(window_attribs))
+        .build(&winit_mainloop, gl_config_template_builder, 
+            |mut configs| configs.next().unwrap())
+        .map(|res| (res.0.unwrap(), res.1))
+        .unwrap();
+
+    let context_attribs = ContextAttributesBuilder::new()
+        .build(window.window_handle().ok().map(|wh| wh.as_raw()));
+    let display = gl_config.display();
+    let gl_context = unsafe { 
+        display.create_context(&gl_config, &context_attribs)
+            .unwrap()
+            .treat_as_possibly_current() 
+    };
+
+    let suface_attribs = window
+        .build_surface_attributes(Default::default())
+        .unwrap();
+    let gl_surface = unsafe { gl_config
+        .display()
+        .create_window_surface(&gl_config, &suface_attribs)
+        .unwrap()
+    };
+
+    gl_context.make_current(&gl_surface).unwrap();
+    gl_surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap())).unwrap();
+
+    gl::load_with(|proc| display.get_proc_address(CString::new(proc).unwrap().as_c_str()));
+
+    let mut plot = [0.0; 2*BANDWIDTH_PLUS_ONE];
+    plot[0] = MARGIN_VW - 1.0;
+    plot[1] = 0.0;
 
     // Generate X-coordinates beforehand.
     const X_STEP: f32 = 2.0 * (1.0 - MARGIN_VW) / BANDWIDTH as f32;
     let mut x = X_STEP + MARGIN_VW - 1.0;
 
-    for vertex in plot[1..].iter_mut() {
-        vertex.coords[0] = x;
+    for i in 1..BANDWIDTH_PLUS_ONE {
+        plot[2*i + 0] = x;
         x += X_STEP;
     }
 
-    let plot_buffer = VertexBuffer::dynamic(&display, &plot).unwrap();
-    let indices = NoIndices(PrimitiveType::LineStrip);
-    let program =
-        Program::from_source(&display, VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC, None).unwrap();
-    let draw_params = DrawParameters {
-        line_width: Some(LINE_WIDTH),
-        ..Default::default()
-    };
+    let renderer = unsafe { PolygonRenderer::new(LINE_WIDTH) };
 
     let mut planner = RealFftPlanner::new();
     let fft = planner.plan_fft_forward(WINDOW_SIZE as usize);
@@ -405,14 +403,12 @@ fn main() {
     let app = App {
         stream,
         window,
-        display,
+        gl_context,
+        gl_surface,
         audio_rec,
         fft,
         plot,
-        plot_buffer,
-        indices,
-        program,
-        draw_params,
+        renderer,
         gain: GAIN,
         gain_multiplier: db_rms_to_factor(GAIN),
         frequency_bins,
