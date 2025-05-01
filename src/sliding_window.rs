@@ -1,23 +1,23 @@
-/// A special kind of circular buffer, where a write pointer moves forward and a read pointer lags.
+/// An adaptor for special kind of circular buffer, where only a write pointer moves forward.
 /// Data is read past that pointer, in circular fashion, until reaching the write pointer again.
 /// It is done so to imitate a window that slides over a string of data—something which it is
 /// eponymous for.
-pub(crate) struct SlidingWindow<T, const N: usize> 
+pub(crate) struct SlidingWindowAdapter<'a, T> 
 {
-    buffer: [T; N],
+    buffer: &'a mut [T],
     cursor: usize,
 }
 
-impl<T, const N: usize> SlidingWindow<T, N> {
-    pub(crate) fn new(buffer: [T; N], cursor: usize) -> Self {
+impl<'a, T> SlidingWindowAdapter<'a, T> {
+    pub(crate) fn new(buffer: &'a mut [T], cursor: usize) -> Self {
         Self {
             buffer,
             cursor
         }
     }
 
-    pub(crate) fn iter(&self) -> SlidingWindowIter<T, N> {
-        SlidingWindowIter { window: self, index: self.cursor, capacity: N }
+    pub(crate) fn iter(&'a self) -> SlidingWindowIter<'a, T> {
+        SlidingWindowIter { window: self, index: self.cursor, capacity: self.buffer.len() }
     }
 
     pub(crate) fn put(&mut self, elem: T) {
@@ -26,13 +26,13 @@ impl<T, const N: usize> SlidingWindow<T, N> {
     }
 }
 
-pub(crate) struct SlidingWindowIter<'a, T, const N: usize> {
-    window: &'a SlidingWindow<T, N>,
+pub(crate) struct SlidingWindowIter<'a, T> {
+    window: &'a SlidingWindowAdapter<'a, T>,
     index: usize,
     capacity: usize,
 }
 
-impl<'a, T, const N: usize> Iterator for SlidingWindowIter<'a, T, N>
+impl<'a, T> Iterator for SlidingWindowIter<'a, T>
 {
     type Item = &'a T;
 

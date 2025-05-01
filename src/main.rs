@@ -2,8 +2,10 @@ use std::cell::RefCell;
 use std::f32::consts::{PI, SQRT_2};
 use std::ffi::CString;
 use std::io::Cursor;
-use std::mem::size_of;
+use std::marker::PhantomPinned;
+use std::mem::{size_of, MaybeUninit};
 use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,7 +71,7 @@ mod sliding_window;
 mod polygon_renderer;
 
 use polygon_renderer::PolygonRenderer;
-use sliding_window::SlidingWindow;
+use sliding_window::SlidingWindowAdapter;
 
 lazy_static! {
     // Hann window function.
@@ -87,17 +89,36 @@ lazy_static! {
     })();
 }
 
-struct AudioRecorder {
-    window: SlidingWindow<f32, WINDOW_SIZE>,
+struct AudioRecorder<'a> {
+    window_buffer: [f32; WINDOW_SIZE],
+    window: MaybeUninit<SlidingWindowAdapter<'a, f32>>,
     channels: usize,
+    _pinned: PhantomPinned,
 }
 
-impl AudioRecorder {
-    fn new() -> Self {
-        Self {
-            window: SlidingWindow::new([0.0; WINDOW_SIZE], 0),
+impl<'a> AudioRecorder<'a> {
+    // NOTE A Pin<Box<T>> inside a Rc<T> is redundant because Rc<T> allocates its data on heap. 
+    // Unlike Pin<Box<T>>, Pin<Rc<T>> doesn't have a Pin<T>::get_mut() method because a Rc<T>
+    // hands out immutable references; RefCell<T> enables interior mutability in this case.
+    fn new() -> Pin<Rc<RefCell<Self>>> {
+        let buffer = [0.0; WINDOW_SIZE];
+        let recorder = Rc::pin(RefCell::new(Self {
+            window_buffer: buffer,
+            window: MaybeUninit::uninit(),
             channels: 0,
-        }
+            // Mark it as !Unpin.
+            _pinned: PhantomPinned
+        }));
+
+        unsafe {
+            let mut recorder_ref = recorder.borrow_mut();
+            // Borrow rules don't cover self-referential structs, so we create a raw pointer to evade it.
+            let buffer_ptr: *mut [f32] = &mut recorder_ref.window_buffer;
+
+            recorder_ref.window.write(SlidingWindowAdapter::new(&mut *buffer_ptr, 0));
+        };
+
+        recorder
     }
 
     fn callback(&mut self, stream: &StreamRef) {
@@ -125,7 +146,9 @@ impl AudioRecorder {
 
                 s /= n_chans as f32;
 
-                self.window.put(s);
+                unsafe {
+                    self.window.assume_init_mut().put(s);
+                }
             }
         }
     }
@@ -136,13 +159,13 @@ fn db_rms_to_factor(rms: f32) -> f32 {
     SQRT_2 * 10.0.powf(rms / 20.0)
 }
 
-struct App {
+struct App<'a> {
     stream: Box<Stream>,
 
     window: Window,
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
-    audio_rec: Rc<RefCell<AudioRecorder>>,
+    audio_rec: Pin<Rc<RefCell<AudioRecorder<'a>>>>,
     fft: Arc<dyn RealToComplex<f32>>,
 
     plot: [f32; 2*BANDWIDTH_PLUS_ONE],
@@ -157,7 +180,7 @@ struct App {
     windowed_signal: [f32; WINDOW_SIZE],
 }
 
-impl App {
+impl<'a> App<'a> {
     fn increase_gain(&mut self, increment: f32) {
         self.gain += increment;
         self.gain_multiplier = db_rms_to_factor(self.gain);
@@ -191,7 +214,7 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl<'a> ApplicationHandler for App<'a> {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         self.stream.set_active(true).unwrap();
     }
@@ -259,7 +282,8 @@ impl ApplicationHandler for App {
             },
             WindowEvent::RedrawRequested => {
                 let audio_recorder = self.audio_rec.borrow();
-                for (i, s) in audio_recorder.window.iter().enumerate() {
+                let window = unsafe { audio_recorder.window.assume_init_ref() };
+                for (i, s) in window.iter().enumerate() {
                     self.windowed_signal[i] = WINDOW_FN[i] * (*s);
                 }
                 drop(audio_recorder);
@@ -302,7 +326,7 @@ impl ApplicationHandler for App {
 fn main() {
     pw::init();
 
-    let audio_rec = Rc::new(RefCell::new(AudioRecorder::new()));
+    let audio_rec = AudioRecorder::new();
 
     let pw_mainloop = MainLoop::new(None).unwrap();
     let pw_context = Context::new(&pw_mainloop).unwrap();
@@ -346,7 +370,9 @@ fn main() {
 
             user_data.borrow_mut().channels = channels;
         })
-        .process(|stream, user_data| user_data.borrow_mut().callback(&stream))
+        .process(|stream, user_data| {
+            user_data.as_ref().borrow_mut().callback(stream);
+        })
         .register()
         .unwrap();
 
