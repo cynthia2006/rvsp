@@ -2,22 +2,23 @@
 /// Data is read past that pointer, in circular fashion, until reaching the write pointer again.
 /// It is done so to imitate a window that slides over a string of data—something which it is
 /// eponymous for.
-pub(crate) struct SlidingWindowAdapter<'a, T> 
-{
+#[derive(Debug)]
+pub(crate) struct SlidingWindowAdapter<'a, T> {
     buffer: &'a mut [T],
     cursor: usize,
 }
 
 impl<'a, T> SlidingWindowAdapter<'a, T> {
     pub(crate) fn new(buffer: &'a mut [T], cursor: usize) -> Self {
-        Self {
-            buffer,
-            cursor
-        }
+        Self { buffer, cursor }
     }
 
     pub(crate) fn iter(&'a self) -> SlidingWindowIter<'a, T> {
-        SlidingWindowIter { window: self, index: self.cursor, capacity: self.buffer.len() }
+        SlidingWindowIter {
+            window: self,
+            index: self.cursor,
+            capacity: self.buffer.len(),
+        }
     }
 
     pub(crate) fn put(&mut self, elem: T) {
@@ -32,12 +33,10 @@ pub(crate) struct SlidingWindowIter<'a, T> {
     capacity: usize,
 }
 
-impl<'a, T> Iterator for SlidingWindowIter<'a, T>
-{
+impl<'a, T> Iterator for SlidingWindowIter<'a, T> {
     type Item = &'a T;
 
-    fn next(&mut self) -> Option<Self::Item>
-    {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.capacity == 0 {
             None
         } else {
@@ -45,7 +44,7 @@ impl<'a, T> Iterator for SlidingWindowIter<'a, T>
 
             self.index = (self.index + 1) % self.window.buffer.len();
             self.capacity -= 1;
-            
+
             Some(elem)
         }
     }

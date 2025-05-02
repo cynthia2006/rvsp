@@ -4,25 +4,30 @@ use gl::types::{GLsizeiptr, GLuint};
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref VERTEX_SHADER_SRC: CString = CString::new(r"#version 330 core
+    static ref VERTEX_SHADER_SRC: CString = CString::new(
+        r"#version 330 core
     in vec2 coords;
 
     void main() {
         gl_Position = vec4(coords.xy, 0.0f, 1.0f);
-    }").unwrap();
-
-    static ref FRAGMENT_SHADER_SRC: CString = CString::new(r"#version 330 core
+    }"
+    )
+    .unwrap();
+    static ref FRAGMENT_SHADER_SRC: CString = CString::new(
+        r"#version 330 core
     out vec4 FragColor;
 
     void main() {
         FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    }").unwrap();
+    }"
+    )
+    .unwrap();
 }
 
 pub(crate) struct PolygonRenderer {
     vao: GLuint,
     program: GLuint,
-    line_width: f32
+    line_width: f32,
 }
 
 impl PolygonRenderer {
@@ -33,9 +38,14 @@ impl PolygonRenderer {
         let program = gl::CreateProgram();
         let vertex_shader = gl::CreateShader(gl::VERTEX_SHADER);
         let fragment_shader = gl::CreateShader(gl::FRAGMENT_SHADER);
-        
+
         gl::ShaderSource(vertex_shader, 1, &VERTEX_SHADER_SRC.as_ptr(), ptr::null());
-        gl::ShaderSource(fragment_shader, 1, &FRAGMENT_SHADER_SRC.as_ptr(), ptr::null());
+        gl::ShaderSource(
+            fragment_shader,
+            1,
+            &FRAGMENT_SHADER_SRC.as_ptr(),
+            ptr::null(),
+        );
         gl::CompileShader(vertex_shader);
         gl::CompileShader(fragment_shader);
         gl::AttachShader(program, vertex_shader);
@@ -65,7 +75,7 @@ impl PolygonRenderer {
         Self {
             vao,
             program,
-            line_width
+            line_width,
         }
     }
 

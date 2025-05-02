@@ -1,9 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell, UnsafeCell};
 use std::f32::consts::{PI, SQRT_2};
 use std::ffi::CString;
 use std::io::Cursor;
 use std::marker::PhantomPinned;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -67,8 +67,8 @@ const HIGH_BIN: usize = (BIN_WIDTH * MAX_FREQ as f32) as usize;
 const BANDWIDTH: usize = HIGH_BIN - LOW_BIN;
 const BANDWIDTH_PLUS_ONE: usize = BANDWIDTH + 1;
 
-mod sliding_window;
 mod polygon_renderer;
+mod sliding_window;
 
 use polygon_renderer::PolygonRenderer;
 use sliding_window::SlidingWindowAdapter;
@@ -90,38 +90,42 @@ lazy_static! {
 }
 
 struct AudioRecorder<'a> {
-    window_buffer: [f32; WINDOW_SIZE],
-    window: MaybeUninit<SlidingWindowAdapter<'a, f32>>,
-    channels: usize,
+    window_buffer: UnsafeCell<[f32; WINDOW_SIZE]>,
+    window: OnceCell<RefCell<SlidingWindowAdapter<'a, f32>>>,
+    channels: OnceCell<usize>,
     _pinned: PhantomPinned,
 }
 
 impl<'a> AudioRecorder<'a> {
-    // NOTE A Pin<Box<T>> inside a Rc<T> is redundant because Rc<T> allocates its data on heap. 
-    // Unlike Pin<Box<T>>, Pin<Rc<T>> doesn't have a Pin<T>::get_mut() method because a Rc<T>
-    // hands out immutable references; RefCell<T> enables interior mutability in this case.
-    fn new() -> Pin<Rc<RefCell<Self>>> {
+    fn new() -> Pin<Rc<Self>> {
         let buffer = [0.0; WINDOW_SIZE];
-        let recorder = Rc::pin(RefCell::new(Self {
-            window_buffer: buffer,
-            window: MaybeUninit::uninit(),
-            channels: 0,
-            // Mark it as !Unpin.
-            _pinned: PhantomPinned
-        }));
+        let recorder = Rc::pin(Self {
+            window_buffer: UnsafeCell::new(buffer),
+            window: OnceCell::new(),
+            channels: OnceCell::new(),
+            _pinned: PhantomPinned,
+        });
 
         unsafe {
-            let mut recorder_ref = recorder.borrow_mut();
             // Borrow rules don't cover self-referential structs, so we create a raw pointer to evade it.
-            let buffer_ptr: *mut [f32] = &mut recorder_ref.window_buffer;
+            let buffer_ptr = recorder.window_buffer.get();
 
-            recorder_ref.window.write(SlidingWindowAdapter::new(&mut *buffer_ptr, 0));
+            recorder
+                .window
+                .set(RefCell::new(SlidingWindowAdapter::new(&mut *buffer_ptr, 0)))
+                .unwrap();
         };
 
         recorder
     }
 
-    fn callback(&mut self, stream: &StreamRef) {
+    // Pinning isn't structual here, because the adaptor doesn't need to be pinned in order
+    // to be valid; it's merely an adaptor for the backing buffer we have.
+    fn window(self: Pin<&Self>) -> &RefCell<SlidingWindowAdapter<'a, f32>> {
+        self.get_ref().window.get().unwrap()
+    }
+
+    fn callback(self: Pin<&Self>, stream: &StreamRef) {
         let mut buffer = stream.dequeue_buffer().unwrap();
         let datas = buffer.datas_mut();
         if datas.is_empty() {
@@ -129,8 +133,9 @@ impl<'a> AudioRecorder<'a> {
         }
 
         let data = &mut datas[0];
-        let n_chans = self.channels;
+        let n_chans = *self.channels.get().unwrap_or(&0);
         let n_samples = data.chunk().size() as usize / size_of::<f32>() / n_chans;
+        let mut window = self.window().borrow_mut();
 
         if let Some(samples) = data.data() {
             for i in 0..n_samples {
@@ -146,9 +151,7 @@ impl<'a> AudioRecorder<'a> {
 
                 s /= n_chans as f32;
 
-                unsafe {
-                    self.window.assume_init_mut().put(s);
-                }
+                window.put(s);
             }
         }
     }
@@ -165,10 +168,10 @@ struct App<'a> {
     window: Window,
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
-    audio_rec: Pin<Rc<RefCell<AudioRecorder<'a>>>>,
+    audio_rec: Pin<Rc<AudioRecorder<'a>>>,
     fft: Arc<dyn RealToComplex<f32>>,
 
-    plot: [f32; 2*BANDWIDTH_PLUS_ONE],
+    plot: [f32; 2 * BANDWIDTH_PLUS_ONE],
     renderer: PolygonRenderer,
 
     gain: f32,
@@ -236,7 +239,7 @@ impl<'a> ApplicationHandler for App<'a> {
                     },
                 ..
             } => {
-                self.increase_gain(0.1);
+                self.increase_gain(1.0);
                 self.update_window_title();
             }
             WindowEvent::KeyboardInput {
@@ -248,45 +251,47 @@ impl<'a> ApplicationHandler for App<'a> {
                     },
                 ..
             } => {
-                self.decrease_gain(0.1);
+                self.decrease_gain(1.0);
                 self.update_window_title();
-            },
-            WindowEvent::KeyboardInput { 
-                event: KeyEvent { 
-                    physical_key: PhysicalKey::Code(KeyCode::ArrowLeft),
-                    state: ElementState::Pressed,
-                    ..
-                },
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::ArrowLeft),
+                        state: ElementState::Pressed,
+                        ..
+                    },
                 ..
             } => {
                 self.decrease_smoothing(0.01);
                 self.update_window_title();
-            },
-            WindowEvent::KeyboardInput { 
-                event: KeyEvent { 
-                    physical_key: PhysicalKey::Code(KeyCode::ArrowRight),
-                    state: ElementState::Pressed,
-                    ..
-                },
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::ArrowRight),
+                        state: ElementState::Pressed,
+                        ..
+                    },
                 ..
             } => {
                 self.increase_smoothing(0.01);
                 self.update_window_title();
-            },
+            }
 
             WindowEvent::Resized(PhysicalSize { width, height }) => {
                 self.gl_surface.resize(
-                    &self.gl_context, 
+                    &self.gl_context,
                     NonZeroU32::new(width).unwrap(),
-                    NonZeroU32::new(height).unwrap());
-            },
+                    NonZeroU32::new(height).unwrap(),
+                );
+            }
             WindowEvent::RedrawRequested => {
-                let audio_recorder = self.audio_rec.borrow();
-                let window = unsafe { audio_recorder.window.assume_init_ref() };
+                let window = self.audio_rec.as_ref().window().borrow_mut();
                 for (i, s) in window.iter().enumerate() {
                     self.windowed_signal[i] = WINDOW_FN[i] * (*s);
                 }
-                drop(audio_recorder);
+                // drop(window);
 
                 self.fft
                     .process_with_scratch(
@@ -296,7 +301,9 @@ impl<'a> ApplicationHandler for App<'a> {
                     )
                     .unwrap();
 
-                unsafe { self.renderer.clear((1.0, 1.0, 0.0)); }
+                unsafe {
+                    self.renderer.clear((1.0, 1.0, 0.0));
+                }
 
                 let mut sign = 1.0;
                 for (i, bin) in self.frequency_bins[LOW_BIN..HIGH_BIN].iter().enumerate() {
@@ -307,12 +314,14 @@ impl<'a> ApplicationHandler for App<'a> {
                             * NORMALIZATION;
 
                     self.smoothed_fft[i] = y;
-                    self.plot[2*(i + 1) + 1] = sign * y;
+                    self.plot[2 * (i + 1) + 1] = sign * y;
 
                     sign *= -1.0;
                 }
 
-                unsafe { self.renderer.upload(&self.plot); }
+                unsafe {
+                    self.renderer.upload(&self.plot);
+                }
 
                 self.window.pre_present_notify();
                 self.gl_surface.swap_buffers(&self.gl_context).unwrap();
@@ -358,20 +367,15 @@ fn main() {
                 return;
             }
 
-            // Channels would be zero, when the format is cleared.
-            let mut channels = 0;
-
             if let Some(param) = param {
                 let mut format = AudioInfoRaw::new();
                 format.parse(param).unwrap();
 
-                channels = format.channels() as usize;
+                user_data.channels.set(format.channels() as usize).unwrap();
             }
-
-            user_data.borrow_mut().channels = channels;
         })
         .process(|stream, user_data| {
-            user_data.as_ref().borrow_mut().callback(stream);
+            user_data.as_ref().callback(stream);
         })
         .register()
         .unwrap();
@@ -406,42 +410,48 @@ fn main() {
         .unwrap();
 
     let winit_mainloop = EventLoop::new().unwrap();
-    let window_attribs = Window::default_attributes()
-        .with_inner_size(dpi::PhysicalSize { width: WIDTH, height: HEIGHT });
-    let gl_config_template_builder = ConfigTemplateBuilder::new()
-        .with_multisampling(MSAA);
+    let window_attribs = Window::default_attributes().with_inner_size(dpi::PhysicalSize {
+        width: WIDTH,
+        height: HEIGHT,
+    });
+    let gl_config_template_builder = ConfigTemplateBuilder::new().with_multisampling(MSAA);
 
     let (window, gl_config) = glutin_winit::DisplayBuilder::new()
         .with_window_attributes(Some(window_attribs))
-        .build(&winit_mainloop, gl_config_template_builder, 
-            |mut configs| configs.next().unwrap())
+        .build(
+            &winit_mainloop,
+            gl_config_template_builder,
+            |mut configs| configs.next().unwrap(),
+        )
         .map(|res| (res.0.unwrap(), res.1))
         .unwrap();
 
-    let context_attribs = ContextAttributesBuilder::new()
-        .build(window.window_handle().ok().map(|wh| wh.as_raw()));
+    let context_attribs =
+        ContextAttributesBuilder::new().build(window.window_handle().ok().map(|wh| wh.as_raw()));
     let gl_display = gl_config.display();
-    let gl_context = unsafe { 
-        gl_display.create_context(&gl_config, &context_attribs)
+    let gl_context = unsafe {
+        gl_display
+            .create_context(&gl_config, &context_attribs)
             .unwrap()
-            .treat_as_possibly_current() 
+            .treat_as_possibly_current()
     };
 
-    let suface_attribs = window
-        .build_surface_attributes(Default::default())
-        .unwrap();
-    let gl_surface = unsafe { gl_config
-        .display()
-        .create_window_surface(&gl_config, &suface_attribs)
-        .unwrap()
+    let suface_attribs = window.build_surface_attributes(Default::default()).unwrap();
+    let gl_surface = unsafe {
+        gl_config
+            .display()
+            .create_window_surface(&gl_config, &suface_attribs)
+            .unwrap()
     };
 
     gl_context.make_current(&gl_surface).unwrap();
-    gl_surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap())).unwrap();
+    gl_surface
+        .set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::new(1).unwrap()))
+        .unwrap();
 
     gl::load_with(|proc| gl_display.get_proc_address(CString::new(proc).unwrap().as_c_str()));
 
-    let mut plot = [0.0; 2*BANDWIDTH_PLUS_ONE];
+    let mut plot = [0.0; 2 * BANDWIDTH_PLUS_ONE];
     plot[0] = MARGIN_VW - 1.0;
     plot[1] = 0.0;
 
@@ -450,7 +460,7 @@ fn main() {
     let mut x = X_STEP + MARGIN_VW - 1.0;
 
     for i in 1..BANDWIDTH_PLUS_ONE {
-        plot[2*i + 0] = x;
+        plot[2 * i + 0] = x;
         x += X_STEP;
     }
 
@@ -489,7 +499,9 @@ fn main() {
         pw_mainloop_rc
             .loop_()
             .add_io(winit_mainloop, IoFlags::IN | IoFlags::ERR, move |loop_| {
-                if let PumpStatus::Exit(_) = loop_.pump_app_events(Some(Duration::ZERO), &mut *app.borrow_mut()) {
+                if let PumpStatus::Exit(_) =
+                    loop_.pump_app_events(Some(Duration::ZERO), &mut *app.borrow_mut())
+                {
                     pw_mainloop_clone.quit();
                 }
             });
