@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gl::types::GLsizei;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextAttributesBuilder, PossiblyCurrentContext};
 use glutin::display::GetGlDisplay;
@@ -285,13 +286,21 @@ impl<'a> ApplicationHandler for App<'a> {
                     NonZeroU32::new(width).unwrap(),
                     NonZeroU32::new(height).unwrap(),
                 );
+
+                unsafe {
+                    gl::Viewport(0, 0, width as GLsizei, height as GLsizei);
+
+                    // Change line-width in a manner that preserves the thickness at all resolutions.
+                    self.renderer
+                        .set_line_width(LINE_WIDTH / WIDTH as f32 * width as f32);
+                }
             }
             WindowEvent::RedrawRequested => {
                 let window = self.audio_rec.as_ref().window().borrow_mut();
                 for (i, s) in window.iter().enumerate() {
                     self.windowed_signal[i] = WINDOW_FN[i] * (*s);
                 }
-                // drop(window);
+                // The drop call is no longer required because apparently everything is single threaded.
 
                 self.fft
                     .process_with_scratch(

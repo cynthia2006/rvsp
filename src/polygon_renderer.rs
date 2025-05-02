@@ -98,4 +98,8 @@ impl PolygonRenderer {
         // Length of this array must be aligned to the number of vertices.
         gl::DrawArrays(gl::LINE_STRIP, 0, plot.len() as i32 / 2);
     }
+
+    pub(crate) fn set_line_width(&mut self, line_width: f32) {
+        self.line_width = line_width;
+    }
 }
