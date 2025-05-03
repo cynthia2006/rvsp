@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gl::types::GLsizei;
-use glutin::config::ConfigTemplateBuilder;
-use glutin::context::{ContextAttributesBuilder, PossiblyCurrentContext};
+
+use glutin::config::{ConfigTemplateBuilder, GlConfig};
+use glutin::context::{ContextApi, ContextAttributesBuilder, PossiblyCurrentContext};
 use glutin::display::GetGlDisplay;
 use glutin::prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext};
 use glutin::surface::{GlSurface, Surface, SwapInterval, WindowSurface};
@@ -27,8 +28,6 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::{Window, WindowId};
-
-use lazy_static::lazy_static;
 
 use pipewire as pw;
 use pipewire::context::Context;
@@ -50,7 +49,7 @@ const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 const MARGIN_VW: f32 = 0.01;
 const LINE_WIDTH: f32 = 1.5;
-const MSAA: u8 = 8; // 8x MSAA.
+const MAX_MSAA: u8 = 8; // 8x MSAA.
 
 const SAMPLERATE: u32 = 48000;
 const WINDOW_SIZE: usize = 2048;
@@ -74,22 +73,6 @@ mod sliding_window;
 
 use polygon_renderer::PolygonRenderer;
 use sliding_window::SlidingWindowAdapter;
-
-lazy_static! {
-    // Hann window function.
-    static ref WINDOW_FN: [f32; WINDOW_SIZE] = (|| {
-        let mut win = [0.0; WINDOW_SIZE];
-
-        const A0: f32 = 0.5;
-        for (i, w) in win.iter_mut().enumerate() {
-            let x: f32 = (2.0 * PI * i as f32 / WINDOW_SIZE as f32).cos();
-
-            *w = A0 - (1.0 - A0) * x;
-        }
-
-        win
-    })();
-}
 
 struct AudioRecorder<'a> {
     window_buffer: UnsafeCell<[f32; WINDOW_SIZE]>,
@@ -181,6 +164,7 @@ struct App<'a> {
     smoothing_factor: f32,
     frequency_bins: [Complex32; FFT_SIZE],
     fft_scratch: Vec<Complex32>,
+    hann_window: [f32; WINDOW_SIZE],
     smoothed_fft: [f32; BANDWIDTH],
     windowed_signal: [f32; WINDOW_SIZE],
 }
@@ -299,7 +283,7 @@ impl<'a> ApplicationHandler for App<'a> {
             WindowEvent::RedrawRequested => {
                 let window = self.audio_rec.as_ref().window().borrow_mut();
                 for (i, s) in window.iter().enumerate() {
-                    self.windowed_signal[i] = WINDOW_FN[i] * (*s);
+                    self.windowed_signal[i] = self.hann_window[i] * (*s);
                 }
                 // The drop call is no longer required because apparently everything is single threaded.
 
@@ -344,6 +328,15 @@ impl<'a> ApplicationHandler for App<'a> {
 
 fn main() {
     pw::init();
+
+    let mut hann_window = [0.0; WINDOW_SIZE];
+
+    const A0: f32 = 0.5;
+    for (i, w) in hann_window.iter_mut().enumerate() {
+        let x: f32 = (2.0 * PI * i as f32 / WINDOW_SIZE as f32).cos();
+
+        *w = A0 - (1.0 - A0) * x;
+    }
 
     let audio_rec = AudioRecorder::new();
 
@@ -424,25 +417,32 @@ fn main() {
         width: WIDTH,
         height: HEIGHT,
     });
-    let gl_config_template_builder = ConfigTemplateBuilder::new().with_multisampling(MSAA);
-
     let (window, gl_config) = glutin_winit::DisplayBuilder::new()
         .with_window_attributes(Some(window_attribs))
-        .build(
-            &winit_mainloop,
-            gl_config_template_builder,
-            |mut configs| configs.next().unwrap(),
-        )
+        .build(&winit_mainloop, ConfigTemplateBuilder::new(), |configs| {
+            configs
+                .take_while(|config| config.num_samples() <= MAX_MSAA)
+                .max_by(|c1, c2| c1.num_samples().cmp(&c2.num_samples()))
+                .unwrap()
+        })
         .map(|res| (res.0.unwrap(), res.1))
         .unwrap();
 
-    let context_attribs =
-        ContextAttributesBuilder::new().build(window.window_handle().ok().map(|wh| wh.as_raw()));
+    let wh_handle = window.window_handle().ok().map(|wh| wh.as_raw());
+    let context_attribs = ContextAttributesBuilder::new().build(wh_handle);
+    let context_attribs_gles = ContextAttributesBuilder::new()
+        .with_context_api(ContextApi::Gles(None))
+        .build(wh_handle);
+
     let gl_display = gl_config.display();
     let gl_context = unsafe {
         gl_display
             .create_context(&gl_config, &context_attribs)
-            .unwrap()
+            .unwrap_or_else(|_| {
+                gl_display
+                    .create_context(&gl_config, &context_attribs_gles)
+                    .unwrap()
+            })
             .treat_as_possibly_current()
     };
 
@@ -494,6 +494,7 @@ fn main() {
         gain_multiplier: db_rms_to_factor(GAIN),
         smoothing_factor: SMOOTHING_FACTOR,
         frequency_bins,
+        hann_window,
         fft_scratch,
         smoothed_fft: [0.0; BANDWIDTH],
         windowed_signal: [0.0; WINDOW_SIZE],
