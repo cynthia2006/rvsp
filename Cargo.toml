@@ -1,6 +1,6 @@
 [package]
 name = "rvsp"
-version = "0.1.6"
+version = "1.0.0"
 edition = "2021"
 description = "Audio spectrum visualizer in Rust"
 authors = ["Cynthia <cynthia2048@proton.me>"]

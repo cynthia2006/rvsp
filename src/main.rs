@@ -58,9 +58,10 @@ const WINDOW_SIZE_HALF: usize = WINDOW_SIZE / 2;
 const FFT_SIZE: usize = WINDOW_SIZE / 2 + 1;
 const MIN_FREQ: i32 = 50;
 const MAX_FREQ: i32 = 10000;
-const GAIN: f32 = 26.0;
+const GAIN: f32 = 23.0;
+const GAIN_STEP: f32 = 0.1;
 const NORMALIZATION: f32 = 1.0 / WINDOW_SIZE as f32;
-const SMOOTHING_FACTOR: f32 = 0.6;
+const SMOOTHING_FACTOR: f32 = 0.7;
 
 const BIN_WIDTH: f32 = WINDOW_SIZE as f32 / SAMPLERATE as f32;
 const LOW_BIN: usize = (BIN_WIDTH * MIN_FREQ as f32) as usize;
@@ -240,7 +241,7 @@ impl<'a> ApplicationHandler for App<'a> {
                     },
                 ..
             } => {
-                self.increase_gain(1.0);
+                self.increase_gain(GAIN_STEP);
                 self.update_window_title();
             }
             WindowEvent::KeyboardInput {
@@ -252,7 +253,7 @@ impl<'a> ApplicationHandler for App<'a> {
                     },
                 ..
             } => {
-                self.decrease_gain(1.0);
+                self.decrease_gain(GAIN_STEP);
                 self.update_window_title();
             }
             WindowEvent::KeyboardInput {
