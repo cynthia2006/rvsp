@@ -3,6 +3,8 @@ rvsp is a lightweight audio spectrum visualizer made in Rust, drawing inspiratio
 
 > This uses PipeWire and Wayland/EGL (via **winit**/**glutin**), which is not available anywhere except Linux. Since my primary workstation is Linux, I have no plans to port it to Windows or Mac.
 
+https://github.com/user-attachments/assets/a770dbe9-7315-40d6-a522-52dabebbcf86
+
 ## Installation
 
 PipeWire development headers must be installed through the package manager of your distribution, if it packages them separately.
@@ -48,10 +50,6 @@ The **spectrum is linear**, both on the frequency and the amplitude axis. The fr
 To understand the theory that underpins the mechanics of this program, i.e. **STFT** (Short-Time Fourier Transform), read [this](https://brianmcfee.net/dstbook-site/content/ch09-stft/intro.html) article; and, for the choice of normalization, read [this](https://appliedacousticschalmers.github.io/scaling-of-the-dft/AES2020_eBrief/#31--scaling-of-dft-spectra-of-discrete-tones) (rather technical) article.
 
 [1]: https://webaudio.github.io/web-audio-api/#fft-windowing-and-smoothing-over-time
-
-## The Demo
-
-https://github.com/user-attachments/assets/a770dbe9-7315-40d6-a522-52dabebbcf86
 
 
 
