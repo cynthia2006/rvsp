@@ -1,5 +1,5 @@
 # rvsp
-rvsp is an audio spectrum visualizer made in Rust, drawing inspiration from [techniques used in WebAudio API][1]. It is GPU accelerated through OpenGL, supporting Linux and RPIs. 
+rvsp is a lightweight audio spectrum visualizer made in Rust, drawing inspiration from [techniques used in WebAudio API][1]. It is GPU accelerated through OpenGL, supporting Linux and Raspberry PIs. 
 
 > This uses PipeWire and Wayland/EGL (via **winit**/**glutin**), which is not available anywhere except Linux. Since my primary workstation is Linux, I have no plans to port it to Windows or Mac.
 
@@ -51,6 +51,8 @@ To understand the theory that underpins the mechanics of this program, i.e. **ST
 
 ## The Demo
 
+https://github.com/user-attachments/assets/a770dbe9-7315-40d6-a522-52dabebbcf86
 
-https://github.com/user-attachments/assets/73e62204-8bf3-47b6-acdb-f7581fd14a24
+
+
 
