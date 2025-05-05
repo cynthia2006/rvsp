@@ -1,51 +1,75 @@
-/// An adaptor for special kind of circular buffer, where only a write pointer moves forward.
-/// Data is read past that pointer, in circular fashion, until reaching the write pointer again.
-/// It is done so to imitate a window that slides over a string of data—something which it is
-/// eponymous for.
+use std::marker::PhantomData;
+
 #[derive(Debug)]
-pub(crate) struct SlidingWindowAdapter<'a, T> {
-    buffer: &'a mut [T],
+pub(crate) struct SlidingWindow<T, U>
+where
+    U: AsRef<[T]> + AsMut<[T]>,
+{
+    buffer: U,
     cursor: usize,
+    _phantom: PhantomData<T>,
 }
 
-impl<'a, T> SlidingWindowAdapter<'a, T> {
-    pub(crate) fn new(buffer: &'a mut [T], cursor: usize) -> Self {
-        Self { buffer, cursor }
+impl<T, U> SlidingWindow<T, U>
+where
+    U: AsRef<[T]> + AsMut<[T]>,
+{
+    pub(crate) fn new(buffer: U, cursor: usize) -> Self {
+        Self {
+            buffer,
+            cursor,
+            _phantom: PhantomData,
+        }
     }
 
-    pub(crate) fn iter(&'a self) -> SlidingWindowIter<'a, T> {
+    pub(crate) fn iter(&self) -> SlidingWindowIter<T, U> {
+        let capacity = self.buffer.as_ref().len();
+
         SlidingWindowIter {
             window: self,
             index: self.cursor,
-            capacity: self.buffer.len(),
+            capacity,
         }
     }
 
     pub(crate) fn put(&mut self, elem: T) {
-        self.buffer[self.cursor] = elem;
-        self.cursor = (self.cursor + 1) % self.buffer.len();
+        let buffer = self.buffer.as_mut();
+
+        buffer[self.cursor] = elem;
+        self.cursor = (self.cursor + 1) % buffer.len();
     }
+
+    // pub(crate) fn into_inner(self) -> U {
+    //     self.buffer
+    // }
 }
 
-pub(crate) struct SlidingWindowIter<'a, T> {
-    window: &'a SlidingWindowAdapter<'a, T>,
+pub(crate) struct SlidingWindowIter<'a, T, U>
+where
+    U: AsRef<[T]> + AsMut<[T]>,
+{
+    window: &'a SlidingWindow<T, U>,
     index: usize,
     capacity: usize,
 }
 
-impl<'a, T> Iterator for SlidingWindowIter<'a, T> {
+impl<'a, T, U: AsMut<[T]> + 'a> Iterator for SlidingWindowIter<'a, T, U>
+where
+    U: AsRef<[T]> + AsMut<[T]>,
+{
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.capacity == 0 {
             None
         } else {
-            let elem = &self.window.buffer[self.index];
+            let buffer = self.window.buffer.as_ref();
+            let elem = &buffer[self.index];
 
-            self.index = (self.index + 1) % self.window.buffer.len();
+            self.index = (self.index + 1) % buffer.len();
             self.capacity -= 1;
 
-            Some(elem)
+            Some(&elem)
         }
     }
 }

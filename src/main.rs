@@ -1,11 +1,9 @@
-use std::cell::{OnceCell, RefCell, UnsafeCell};
+use std::cell::{OnceCell, RefCell};
 use std::f32::consts::{PI, SQRT_2};
 use std::ffi::CString;
 use std::io::Cursor;
-use std::marker::PhantomPinned;
 use std::mem::size_of;
 use std::num::NonZeroU32;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,45 +70,22 @@ mod polygon_renderer;
 mod sliding_window;
 
 use polygon_renderer::PolygonRenderer;
-use sliding_window::SlidingWindowAdapter;
+use sliding_window::SlidingWindow;
 
-struct AudioRecorder<'a> {
-    window_buffer: UnsafeCell<[f32; WINDOW_SIZE]>,
-    window: OnceCell<RefCell<SlidingWindowAdapter<'a, f32>>>,
+struct AudioRecorder<const N: usize> {
+    window: SlidingWindow<f32, [f32; N]>,
     channels: OnceCell<usize>,
-    _pinned: PhantomPinned,
 }
 
-impl<'a> AudioRecorder<'a> {
-    fn new() -> Pin<Rc<Self>> {
-        let buffer = [0.0; WINDOW_SIZE];
-        let recorder = Rc::pin(Self {
-            window_buffer: UnsafeCell::new(buffer),
-            window: OnceCell::new(),
+impl<const N: usize> AudioRecorder<N> {
+    fn new() -> Self {
+        Self {
+            window: SlidingWindow::new([0.0; N], 0),
             channels: OnceCell::new(),
-            _pinned: PhantomPinned,
-        });
-
-        unsafe {
-            // Borrow rules don't cover self-referential structs, so we create a raw pointer to evade it.
-            let buffer_ptr = recorder.window_buffer.get();
-
-            recorder
-                .window
-                .set(RefCell::new(SlidingWindowAdapter::new(&mut *buffer_ptr, 0)))
-                .unwrap();
-        };
-
-        recorder
+        }
     }
 
-    // Pinning isn't structual here, because the adaptor doesn't need to be pinned in order
-    // to be valid; it's merely an adaptor for the backing buffer we have.
-    fn window(self: Pin<&Self>) -> &RefCell<SlidingWindowAdapter<'a, f32>> {
-        self.get_ref().window.get().unwrap()
-    }
-
-    fn callback(self: Pin<&Self>, stream: &StreamRef) {
+    fn callback(&mut self, stream: &StreamRef) {
         let mut buffer = stream.dequeue_buffer().unwrap();
         let datas = buffer.datas_mut();
         if datas.is_empty() {
@@ -120,7 +95,6 @@ impl<'a> AudioRecorder<'a> {
         let data = &mut datas[0];
         let n_chans = *self.channels.get().unwrap_or(&0);
         let n_samples = data.chunk().size() as usize / size_of::<f32>() / n_chans;
-        let mut window = self.window().borrow_mut();
 
         if let Some(samples) = data.data() {
             for i in 0..n_samples {
@@ -136,7 +110,7 @@ impl<'a> AudioRecorder<'a> {
 
                 s /= n_chans as f32;
 
-                window.put(s);
+                self.window.put(s);
             }
         }
     }
@@ -147,13 +121,13 @@ fn db_rms_to_factor(rms: f32) -> f32 {
     SQRT_2 * 10.0.powf(rms / 20.0)
 }
 
-struct App<'a> {
+struct App {
     stream: Box<Stream>,
 
     window: Window,
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
-    audio_rec: Pin<Rc<AudioRecorder<'a>>>,
+    audio_rec: Rc<RefCell<AudioRecorder<WINDOW_SIZE>>>,
     fft: Arc<dyn RealToComplex<f32>>,
 
     plot: [f32; 2 * BANDWIDTH_PLUS_ONE],
@@ -169,7 +143,7 @@ struct App<'a> {
     windowed_signal: [f32; WINDOW_SIZE],
 }
 
-impl<'a> App<'a> {
+impl App {
     fn increase_gain(&mut self, increment: f32) {
         self.gain += increment;
         self.gain_multiplier = db_rms_to_factor(self.gain);
@@ -203,7 +177,7 @@ impl<'a> App<'a> {
     }
 }
 
-impl<'a> ApplicationHandler for App<'a> {
+impl ApplicationHandler for App {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         self.stream.set_active(true).unwrap();
     }
@@ -281,8 +255,8 @@ impl<'a> ApplicationHandler for App<'a> {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let window = self.audio_rec.as_ref().window().borrow_mut();
-                for (i, s) in window.iter().enumerate() {
+                let audio_rec = self.audio_rec.borrow();
+                for (i, s) in audio_rec.window.iter().enumerate() {
                     self.windowed_signal[i] = self.hann_window[i] * (*s);
                 }
                 // The drop call is no longer required because apparently everything is single threaded.
@@ -338,7 +312,7 @@ fn main() {
         *w = A0 - (1.0 - A0) * x;
     }
 
-    let audio_rec = AudioRecorder::new();
+    let audio_rec = Rc::new(RefCell::new(AudioRecorder::new()));
 
     let pw_mainloop = MainLoop::new(None).unwrap();
     let pw_context = Context::new(&pw_mainloop).unwrap();
@@ -374,11 +348,15 @@ fn main() {
                 let mut format = AudioInfoRaw::new();
                 format.parse(param).unwrap();
 
-                user_data.channels.set(format.channels() as usize).unwrap();
+                user_data
+                    .borrow_mut()
+                    .channels
+                    .set(format.channels() as usize)
+                    .unwrap();
             }
         })
         .process(|stream, user_data| {
-            user_data.as_ref().callback(stream);
+            user_data.borrow_mut().callback(stream);
         })
         .register()
         .unwrap();
