@@ -697,7 +697,8 @@ dependencies = [
 [[package]]
 name = "libspa"
 version = "0.8.0"
-source = "git+https://gitlab.freedesktop.org/pipewire/pipewire-rs#fd3d8f7861a29c2eeaa4c393402e013578bb36d9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65f3a4b81b2a2d8c7f300643676202debd1b7c929dbf5c9bb89402ea11d19810"
 dependencies = [
  "bitflags 2.8.0",
  "cc",
@@ -713,7 +714,8 @@ dependencies = [
 [[package]]
 name = "libspa-sys"
 version = "0.8.0"
-source = "git+https://gitlab.freedesktop.org/pipewire/pipewire-rs#fd3d8f7861a29c2eeaa4c393402e013578bb36d9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf0d9716420364790e85cbb9d3ac2c950bde16a7dd36f3209b7dfdfc4a24d01f"
 dependencies = [
  "bindgen",
  "cc",
@@ -785,13 +787,12 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.29.0"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
 dependencies = [
  "bitflags 2.8.0",
  "cfg-if",
- "cfg_aliases",
  "libc",
 ]
 
@@ -1149,7 +1150,8 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 [[package]]
 name = "pipewire"
 version = "0.8.0"
-source = "git+https://gitlab.freedesktop.org/pipewire/pipewire-rs#fd3d8f7861a29c2eeaa4c393402e013578bb36d9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08e645ba5c45109106d56610b3ee60eb13a6f2beb8b74f8dc8186cf261788dda"
 dependencies = [
  "anyhow",
  "bitflags 2.8.0",
@@ -1165,7 +1167,8 @@ dependencies = [
 [[package]]
 name = "pipewire-sys"
 version = "0.8.0"
-source = "git+https://gitlab.freedesktop.org/pipewire/pipewire-rs#fd3d8f7861a29c2eeaa4c393402e013578bb36d9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "849e188f90b1dda88fe2bfe1ad31fe5f158af2c98f80fb5d13726c44f3f01112"
 dependencies = [
  "bindgen",
  "libspa-sys",
@@ -1339,19 +1342,6 @@ name = "rustversion"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eded382c5f5f786b989652c49544c4877d9f015cc22e145a5ea8ea66c2921cd2"
-
-[[package]]
-name = "rvsp"
-version = "1.0.0"
-dependencies = [
- "gl",
- "glutin",
- "glutin-winit",
- "lazy_static",
- "pipewire",
- "realfft",
- "winit",
-]
 
 [[package]]
 name = "same-file"
@@ -1597,6 +1587,19 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vsp-rs"
+version = "1.0.1"
+dependencies = [
+ "gl",
+ "glutin",
+ "glutin-winit",
+ "lazy_static",
+ "pipewire",
+ "realfft",
+ "winit",
+]
 
 [[package]]
 name = "walkdir"

@@ -38,10 +38,6 @@ where
         buffer[self.cursor] = elem;
         self.cursor = (self.cursor + 1) % buffer.len();
     }
-
-    // pub(crate) fn into_inner(self) -> U {
-    //     self.buffer
-    // }
 }
 
 pub(crate) struct SlidingWindowIter<'a, T, U>

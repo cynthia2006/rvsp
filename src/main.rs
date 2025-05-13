@@ -122,7 +122,7 @@ fn db_rms_to_factor(rms: f32) -> f32 {
 }
 
 struct App {
-    stream: Box<Stream>,
+    stream: Stream,
 
     window: Window,
     gl_context: PossiblyCurrentContext,
@@ -320,21 +320,19 @@ fn main() {
         .connect(None)
         .expect("Could not connect to PipeWire context");
 
-    let stream = Box::new(
-        Stream::new(
-            &pw_core,
-            &format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-            properties! {
-                *pw::keys::MEDIA_TYPE => "Audio",
-                *pw::keys::MEDIA_CATEGORY => "Monitor",
-                *pw::keys::MEDIA_ROLE => "Music",
-                *pw::keys::NODE_LATENCY => format!("{}/{}", WINDOW_SIZE_HALF, SAMPLERATE),
-                // Monitor system audio; the default sink.
-                *pw::keys::STREAM_CAPTURE_SINK => "true",
-            },
-        )
-        .unwrap(),
-    );
+    let stream = Stream::new(
+        &pw_core,
+        &format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Monitor",
+            *pw::keys::MEDIA_ROLE => "Music",
+            *pw::keys::NODE_LATENCY => format!("{}/{}", WINDOW_SIZE_HALF, SAMPLERATE),
+            // Monitor system audio; the default sink.
+            *pw::keys::STREAM_CAPTURE_SINK => "true",
+        },
+    )
+    .unwrap();
 
     // TODO Handle other events on the stream as well, if required.
     let _listener = stream
