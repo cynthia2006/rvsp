@@ -1,3 +1,6 @@
+> [!WARNING]
+> Development on this repository is *stalled* because of the complexities that arose during its development, and it is strongly advised to use [vsp](https://github.com/cynthia2006/vsp) instead (its C rewrite). Expect no updates, not even dependency updates.
+
 # rvsp
 rvsp is a lightweight audio spectrum visualizer made in Rust, drawing inspiration from [techniques used in WebAudio API][1]. It is GPU accelerated through OpenGL, supporting Linux and Raspberry PIs. 
 
